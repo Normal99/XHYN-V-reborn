@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 XHYN-PH
+name: Build upscaler layer
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - modifications/upscaler/**
+      - .github/workflows/build-upscaler.yml
+  push:
+    paths:
+      - modifications/upscaler/**
+      - .github/workflows/build-upscaler.yml
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build glslang-tools libvulkan-dev \
+            vulkan-validationlayers mesa-vulkan-drivers python3-pil
+      - name: Run host tests (software Vulkan driver and validation layer)
+        run: modifications/upscaler/test/run_host_tests.sh
+
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build libgtav_bcn.so for arm64-v8a (NDK preinstalled on the runner)
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-}}"
+          modifications/upscaler/scripts/build_android.sh
+          sha256sum modifications/upscaler/build/android/libgtav_bcn.so | tee modifications/upscaler/build/android/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xhyn-upscaler-libgtav_bcn
+          path: |
+            modifications/upscaler/build/android/libgtav_bcn.so
+            modifications/upscaler/build/android/SHA256SUMS.txt

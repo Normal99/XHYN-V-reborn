@@ -4,6 +4,7 @@
 - **Original Chinese Android port contributors** — the original Android port and engine adaptation. XHYN V builds on their work.
 - **Rockstar Games and respective rights holders** — GTA V and associated game assets/trademarks. No affiliation or endorsement is implied.
 - **[DXVK](https://github.com/doitsujin/dxvk)** — Direct3D-to-Vulkan implementation and native-port support. The exact custom fork/patch sources used by the bundled binaries are not available here.
+- **[Snapdragon Game Super Resolution](https://github.com/SnapdragonGameStudios/snapdragon-gsr)** by Qualcomm Innovation Center, Inc. (BSD-3-Clause) — the upscaling shader in the experimental [upscaler](../modifications/upscaler/README.md); license in [notices](../notices/Snapdragon-GSR-BSD-3-Clause.txt).
 - **[SDL](https://github.com/libsdl-org/SDL)** — native application/platform integration.
 - **[libadrenotools](https://github.com/bylaws/libadrenotools)** and **[liblinkernsbypass](https://github.com/bylaws/liblinkernsbypass)** by Billy Laws — optional driver loading. Driver ZIPs are user provided.
 - **[Lucide](https://lucide.dev)** — menu icons.

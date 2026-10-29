@@ -6,6 +6,10 @@ The current [English modification layer](../modifications/english-1.7.4/README.m
 
 This is a binary patch/rebuild workflow, not compilation of the original game engine. See its README for commands, dependencies and license scope. Recorded output is in [verification/english-1.7.4](../verification/english-1.7.4). Android execution and gameplay still need a device.
 
+## Experimental upscaler
+
+[`modifications/upscaler`](../modifications/upscaler/README.md) holds an experimental Vulkan layer (Snapdragon GSR 1) and a tool that installs it into the release APK. It has its own build and test instructions and is independent of the English build driver.
+
 ## Older 0.1 sources
 
 This repository publishes the modification layer for review. It is not a self-contained engine build or a complete APK rebuild kit.

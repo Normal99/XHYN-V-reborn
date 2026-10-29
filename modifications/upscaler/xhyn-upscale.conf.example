@@ -1,0 +1,34 @@
+# XHYN V upscaler settings. Copy to
+#   /sdcard/Android/data/com.xhynph.xhynv.reborn174/files/xhyn-upscale.conf
+# (adb push xhyn-upscale.conf.example <that path>). Read again whenever the game creates
+# a swapchain, so changes apply after closing and reopening the game.
+
+# off    - the shim does nothing and forwards everything
+# probe  - log swapchain details and frame pacing to logcat (tag XHYN-UPSCALE); no change to rendering
+# sgsr1  - Snapdragon Game Super Resolution 1 upscaling
+mode = probe
+
+# How much larger than the game's own render size the final image is. 1.0 .. 4.0.
+# 1.5 turns 1280x576 into 1920x864. Ignored when out_width and out_height are both set.
+scale = 1.5
+# out_width = 2640
+# out_height = 1216
+
+# SGSR 1 options (Qualcomm defaults: sharpness 2.0, threshold 8, edge direction off).
+# edge_sharpness 1.0 .. 2.0 (lower is softer), edge_threshold in 1/255 steps.
+edge_sharpness = 2.0
+edge_threshold = 8
+# Slightly better edges for a small extra GPU cost.
+edge_direction = false
+
+# BC texture decoding. auto uses your GPU's hardware BC support and only goes through the
+# original BCn layer when some GPU lacks it. native / inner force one or the other.
+bcn = auto
+
+# Statistics line every N presents (0 = never): frame times and the GPU cost of the upscale pass.
+log_interval = 300
+gpu_timing = true
+
+# Write the game's frame and the upscaled frame as PPM files at this present number
+# (0 = off). They go to dump_dir, default the app's files folder; pull them with adb to compare.
+dump_frame = 0

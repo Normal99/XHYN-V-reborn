@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added an experimental upscaling layer using Snapdragon Game Super Resolution 1 ([source and test guide](modifications/upscaler/README.md)). Not yet tested on a device. It starts in a log-only mode, and FSR 3/4 and SGSR 2 are not possible with this architecture.
+
 ## 1.7.4 — 28 October 2026
 
 - Refreshed XHYN V branding with a transparent purple V logo.
