@@ -50,7 +50,7 @@ VIA_INNER="XHYN_UPSCALE_BCN=inner"   # force the path through the original-layer
 FMT01273=(--ignore VUID-VkSwapchainCreateInfoKHR-imageFormat-01273)  # lavapipe headless lists only UNORM formats
 
 step "BC decoding policy (original BCn layer)"
-run bcn_auto_hardware "$INNER" XHYN_UPSCALE_MODE=sgsr1 XHYN_UPSCALE_DUMP_FRAME=3 -- --pattern flat
+run bcn_auto_hardware "$INNER" XHYN_UPSCALE_MODE=sgsr1 XHYN_UPSCALE_DUMP_FRAME=3 -- --pattern flat --diag-bypassed
 expect_log bcn_auto_hardware "hardware BC, original BCn layer bypassed"
 grep -q "STUB:" "$OUT/bcn_auto_hardware.log" && bad "bcn_auto_hardware: original layer was used" || ok "bcn_auto_hardware: original layer not in the call chain"
 check 3 flat 640 360 960 540
@@ -89,6 +89,13 @@ run sgsr1_recreate "$INNER" "$VIA_INNER" XHYN_UPSCALE_MODE=sgsr1 -- --pattern ed
 [ "$(grep -c 'sgsr1 ready' "$OUT/sgsr1_recreate.log")" = 2 ] && ok "resize recreated the upscaler" || bad "resize did not recreate the upscaler"
 run sgsr1_explicit_size "$INNER" "$VIA_INNER" XHYN_UPSCALE_MODE=sgsr1 XHYN_UPSCALE_OUT_WIDTH=1280 XHYN_UPSCALE_OUT_HEIGHT=720 XHYN_UPSCALE_DUMP_FRAME=3 -- --pattern edges
 check 3 edges 640 360 1280 720
+
+step "SGSR 1: setup failing after the real swapchain exists, on a resize"
+# The enlarged swapchain must be replaced by one of the game's size using it as oldSwapchain;
+# the validation layer flags reuse of a retired oldSwapchain.
+run sgsr1_late_failure "$INNER" "$VIA_INNER" XHYN_UPSCALE_MODE=sgsr1 XHYN_UPSCALE_TEST_FAIL_ATTACH=1 -- --pattern edges --recreate
+expect_log sgsr1_late_failure "sgsr1 setup failed: test hook"
+[ "$(grep -c 'sgsr1 ready' "$OUT/sgsr1_late_failure.log")" = 0 ] && ok "sgsr1_late_failure: game ran unmodified at its own size" || bad "sgsr1_late_failure: upscaler unexpectedly active"
 
 step "SGSR 1: cases where it must stay out of the way"
 run sgsr1_scale1 "$INNER" "$VIA_INNER" XHYN_UPSCALE_MODE=sgsr1 XHYN_UPSCALE_SCALE=1.0 -- --pattern flat

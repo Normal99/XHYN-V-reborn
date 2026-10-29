@@ -22,10 +22,14 @@ FxPlan planFx(DeviceInfo& device, const VkSwapchainCreateInfoKHR& ci, const Conf
 // vkAcquireNextImageKHR and the swapchain handle stay untouched.
 class SwapchainFx {
 public:
-    static std::unique_ptr<SwapchainFx> create(DeviceInfo& device, VkSwapchainKHR chain,
-                                               const VkSwapchainCreateInfoKHR& ci, VkExtent2D out,
-                                               const Config& config);
+    // Builds everything that does not need the real swapchain (pipeline, render pass, sampler).
+    // Nothing in here may fail after the real swapchain exists, so it is called first.
+    static std::unique_ptr<SwapchainFx> create(DeviceInfo& device, const VkSwapchainCreateInfoKHR& ci,
+                                               VkExtent2D out, const Config& config);
     ~SwapchainFx();
+
+    // Second step, once the real swapchain exists: images, views, descriptors, sync objects.
+    bool attach(VkSwapchainKHR chain, const VkSwapchainCreateInfoKHR& ci);
 
     VkResult getImages(uint32_t* count, VkImage* images) const;
 
@@ -47,9 +51,8 @@ private:
         uint32_t timestampBits = 0;
     };
 
-    SwapchainFx(DeviceInfo& device, VkSwapchainKHR chain, const VkSwapchainCreateInfoKHR& ci,
-                VkExtent2D out, const Config& config);
-    bool init(const VkSwapchainCreateInfoKHR& ci);
+    SwapchainFx(DeviceInfo& device, const VkSwapchainCreateInfoKHR& ci, VkExtent2D out, const Config& config);
+    bool prepare();
     bool fail(const char* what, VkResult result);
     void destroy();
     Family* family(uint32_t index);

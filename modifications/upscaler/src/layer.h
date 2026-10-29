@@ -52,6 +52,8 @@ struct InstanceInfo {
     PFN_vkGetPhysicalDeviceProperties getProperties = nullptr;
     PFN_vkGetPhysicalDeviceMemoryProperties getMemoryProperties = nullptr;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties getQueueFamilies = nullptr;
+    PFN_vkGetPhysicalDeviceFormatProperties getFormatProperties = nullptr;
+    PFN_vkGetPhysicalDeviceImageFormatProperties getImageFormatProperties = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR getSurfaceCapabilities = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceFormatsKHR getSurfaceFormats = nullptr;
     PFN_vkGetPhysicalDeviceSurfacePresentModesKHR getPresentModes = nullptr;
@@ -116,5 +118,8 @@ struct InnerLayer {
 const InnerLayer& innerLayer();
 
 DeviceInfo* findDevice(VkDevice device);
+
+// Chooses where BCnLayer_Diagnostics is forwarded (shim.cpp): the original layer or a stub.
+void useInnerDiagnostics(bool inner);
 
 }  // namespace xhyn

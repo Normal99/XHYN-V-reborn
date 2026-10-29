@@ -15,6 +15,11 @@ import sys
 from PIL import Image
 
 
+def pixels(image):
+    # Pillow 12.1 deprecates getdata() in favour of get_flattened_data(); runners differ.
+    return list(image.get_flattened_data() if hasattr(image, 'get_flattened_data') else image.getdata())
+
+
 def load(path):
     image = Image.open(path)
     image.load()
@@ -33,7 +38,7 @@ def main():
 
     if kind == 'flat':
         expected = (100, 150, 200)
-        worst = max(abs(a - b) for pixel in result.get_flattened_data() for a, b in zip(pixel, expected))
+        worst = max(abs(a - b) for pixel in pixels(result) for a, b in zip(pixel, expected))
         print('flat colour: worst channel error %d (input %s)' % (worst, source.getpixel((5, 5))))
         assert source.getpixel((5, 5)) == expected, 'input pattern changed'
         assert worst <= 1, 'flat colour not preserved'
@@ -42,7 +47,7 @@ def main():
     # Edges: the output must stay aligned with, and close to, a bilinear upscale of the input
     # (SGSR only adds a bounded sharpening correction to it).
     bilinear = source.resize((out_w, out_h), Image.BILINEAR)
-    pairs = zip(result.get_flattened_data(), bilinear.get_flattened_data())
+    pairs = zip(pixels(result), pixels(bilinear))
     mse = sum((a - b) ** 2 for p, q in pairs for a, b in zip(p, q)) / (3 * out_w * out_h)
     psnr = 10 * math.log10(255 * 255 / mse) if mse else 99
     print('edges: PSNR vs bilinear %.1f dB' % psnr)

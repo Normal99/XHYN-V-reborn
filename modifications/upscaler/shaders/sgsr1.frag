@@ -60,7 +60,8 @@ vec2 edgeDirection(vec4 left, vec4 right) {
     return vec2(delta.x * lengthInv, delta.y * lengthInv);
 }
 
-vec3 srgbToLinear(vec3 c) {
+// Full precision: the half-precision default above would shift sRGB output by a code or two.
+highp vec3 srgbToLinear(highp vec3 c) {
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
 }
 

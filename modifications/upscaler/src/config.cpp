@@ -93,6 +93,7 @@ std::string packageName() {
     std::ifstream in("/proc/self/cmdline", std::ios::binary);
     std::string name;
     std::getline(in, name, '\0');
+    name = name.substr(0, name.find(':'));  // secondary processes are "<package>:<name>"
     // Only a plausible Android application ID is used to build file paths.
     if (name.find('/') != std::string::npos || name.find('.') == std::string::npos) return "";
     return name;

@@ -54,6 +54,7 @@ DeviceInfo* deviceForQueue(VkQueue queue) {
 // case where there is no original layer to consume it.
 template <class Fn>
 auto withoutLink(const void* createInfo, const void* link, Fn&& fn) {
+    if (!link) return fn();
     auto* head = const_cast<VkStructHeader*>(static_cast<const VkStructHeader*>(createInfo));
     VkStructHeader* prev = head;
     while (prev && prev->pNext != link) prev = const_cast<VkStructHeader*>(static_cast<const VkStructHeader*>(prev->pNext));
@@ -68,11 +69,14 @@ Config g_config;
 bool g_configLoaded = false;
 
 Config currentConfig(bool reload) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    if (reload || !g_configLoaded) {
-        g_config = loadConfig();
-        g_configLoaded = true;
+    if (!reload) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_configLoaded) return g_config;
     }
+    Config loaded = loadConfig();  // file probing happens outside the lock the present path takes
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_config = loaded;
+    g_configLoaded = true;
     return g_config;
 }
 
@@ -185,6 +189,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hookCreateInstance(const VkInstanceCreateInfo* ci
         // InitializeBcn announced an active decoder; nothing decodes on this path.
         setenv("GTAV_BCN_DECODE_ACTIVE", "0", 1);
     }
+    useInnerDiagnostics(viaInner);  // the original layer only has state for instances created through it
 
     auto info = std::make_unique<InstanceInfo>();
     info->handle = *out;
@@ -197,6 +202,8 @@ VKAPI_ATTR VkResult VKAPI_CALL hookCreateInstance(const VkInstanceCreateInfo* ci
     info->getProperties = PFN_CAST(vkGetPhysicalDeviceProperties, lower(*out, "vkGetPhysicalDeviceProperties"));
     info->getMemoryProperties = PFN_CAST(vkGetPhysicalDeviceMemoryProperties, lower(*out, "vkGetPhysicalDeviceMemoryProperties"));
     info->getQueueFamilies = PFN_CAST(vkGetPhysicalDeviceQueueFamilyProperties, lower(*out, "vkGetPhysicalDeviceQueueFamilyProperties"));
+    info->getFormatProperties = PFN_CAST(vkGetPhysicalDeviceFormatProperties, lower(*out, "vkGetPhysicalDeviceFormatProperties"));
+    info->getImageFormatProperties = PFN_CAST(vkGetPhysicalDeviceImageFormatProperties, lower(*out, "vkGetPhysicalDeviceImageFormatProperties"));
     info->getSurfaceCapabilities = PFN_CAST(vkGetPhysicalDeviceSurfaceCapabilitiesKHR, lower(*out, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
     info->getSurfaceFormats = PFN_CAST(vkGetPhysicalDeviceSurfaceFormatsKHR, lower(*out, "vkGetPhysicalDeviceSurfaceFormatsKHR"));
     info->getPresentModes = PFN_CAST(vkGetPhysicalDeviceSurfacePresentModesKHR, lower(*out, "vkGetPhysicalDeviceSurfacePresentModesKHR"));
@@ -267,6 +274,18 @@ VKAPI_ATTR VkResult VKAPI_CALL hookCreateDevice(VkPhysicalDevice physical, const
         if (!d->innerCreateSwapchain || !d->innerDestroySwapchain || !d->innerGetImages || !d->innerPresent)
             d->fnComplete = false;  // device was created without VK_KHR_swapchain
     }
+    // Record every queue now, so presentation does not depend on the game's use of vkGetDeviceQueue.
+    if (d->innerGetQueue) {
+        for (uint32_t i = 0; i < ci->queueCreateInfoCount; ++i) {
+            const VkDeviceQueueCreateInfo& q = ci->pQueueCreateInfos[i];
+            if (q.flags) continue;  // protected queues need vkGetDeviceQueue2
+            for (uint32_t index = 0; index < q.queueCount; ++index) {
+                VkQueue queue = VK_NULL_HANDLE;
+                d->innerGetQueue(*out, q.queueFamilyIndex, index, &queue);
+                if (queue) d->queueFamily[queue] = q.queueFamilyIndex;
+            }
+        }
+    }
     if (inst->getProperties) inst->getProperties(physical, &d->properties);
     if (inst->getMemoryProperties) inst->getMemoryProperties(physical, &d->memory);
     if (inst->getQueueFamilies) {
@@ -301,7 +320,10 @@ VKAPI_ATTR void VKAPI_CALL hookDestroyDevice(VkDevice device, const VkAllocation
 
 VKAPI_ATTR void VKAPI_CALL hookGetDeviceQueue(VkDevice device, uint32_t family, uint32_t index, VkQueue* queue) {
     DeviceInfo* d = findDevice(device);
-    if (!d || !d->innerGetQueue) return;
+    if (!d || !d->innerGetQueue) {
+        *queue = VK_NULL_HANDLE;
+        return;
+    }
     d->innerGetQueue(device, family, index, queue);
     if (*queue) {
         std::lock_guard<std::mutex> lock(d->mutex);
@@ -311,7 +333,10 @@ VKAPI_ATTR void VKAPI_CALL hookGetDeviceQueue(VkDevice device, uint32_t family, 
 
 VKAPI_ATTR void VKAPI_CALL hookGetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2* info, VkQueue* queue) {
     DeviceInfo* d = findDevice(device);
-    if (!d || !d->innerGetQueue2) return;
+    if (!d || !d->innerGetQueue2) {
+        *queue = VK_NULL_HANDLE;
+        return;
+    }
     d->innerGetQueue2(device, info, queue);
     if (*queue) {
         std::lock_guard<std::mutex> lock(d->mutex);
@@ -339,10 +364,22 @@ VKAPI_ATTR VkResult VKAPI_CALL hookCreateSwapchain(VkDevice device, const VkSwap
         d->chains[reinterpret_cast<uint64_t>(chain)] = std::move(state);
     };
 
+    // Everything that can reject the upscaler happens before the real swapchain exists: creating
+    // it retires the game's oldSwapchain, after which the game's own request can no longer be
+    // repeated with that oldSwapchain.
     FxPlan plan;
+    std::unique_ptr<SwapchainFx> fx;
     if (config.mode == Mode::Sgsr1) {
         plan = planFx(*d, *ci, config);
-        if (!plan.ok) XLOGW("sgsr1 not applied to this swapchain: %s", plan.reason);
+        if (!plan.ok) {
+            XLOGW("sgsr1 not applied to this swapchain: %s", plan.reason);
+        } else {
+            fx = SwapchainFx::create(*d, *ci, plan.out, config);
+            if (!fx) {
+                plan.ok = false;
+                XLOGW("sgsr1 not applied to this swapchain: setup failed");
+            }
+        }
     }
     if (!plan.ok) {
         VkResult r = d->innerCreateSwapchain(device, ci, alloc, out);
@@ -356,19 +393,26 @@ VKAPI_ATTR VkResult VKAPI_CALL hookCreateSwapchain(VkDevice device, const VkSwap
     if (config.dumpFrame) real.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     VkResult r = d->innerCreateSwapchain(device, &real, alloc, out);
     if (r != VK_SUCCESS) {
+        // Last resort: the game's own request (its oldSwapchain may already count as retired).
         XLOGW("real swapchain at %ux%u failed (%d); retrying at the game's size", plan.out.width, plan.out.height, r);
+        fx.reset();
         r = d->innerCreateSwapchain(device, ci, alloc, out);
         if (r == VK_SUCCESS) track(*out, ci->imageExtent, nullptr);
         return r;
     }
-    auto fx = SwapchainFx::create(*d, *out, *ci, plan.out, config);
-    if (!fx) {
-        // Drop the enlarged swapchain and give the game what it asked for.
-        d->innerDestroySwapchain(device, *out, alloc);
+    if (!fx->attach(*out, *ci)) {
+        // Replace the enlarged swapchain with one of the game's size. It is still current, so it is a
+        // valid oldSwapchain and the game's own oldSwapchain is not needed again.
+        fx.reset();
         VkSwapchainCreateInfoKHR retry = *ci;
-        retry.oldSwapchain = VK_NULL_HANDLE;
-        r = d->innerCreateSwapchain(device, &retry, alloc, out);
-        if (r == VK_SUCCESS) track(*out, ci->imageExtent, nullptr);
+        retry.oldSwapchain = *out;
+        VkSwapchainKHR plain = VK_NULL_HANDLE;
+        r = d->innerCreateSwapchain(device, &retry, alloc, &plain);
+        d->innerDestroySwapchain(device, *out, alloc);
+        if (r == VK_SUCCESS) {
+            *out = plain;
+            track(plain, ci->imageExtent, nullptr);
+        }
         return r;
     }
     track(*out, ci->imageExtent, std::move(fx));
@@ -405,7 +449,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hookGetSwapchainImages(VkDevice device, VkSwapcha
 
 VKAPI_ATTR VkResult VKAPI_CALL hookQueuePresent(VkQueue queue, const VkPresentInfoKHR* pi) {
     DeviceInfo* d = deviceForQueue(queue);
-    if (!d || !d->innerPresent) return VK_ERROR_INITIALIZATION_FAILED;
+    if (!d || !d->innerPresent) return VK_ERROR_DEVICE_LOST;
 
     struct Item {
         ChainState* state;
@@ -437,7 +481,11 @@ VKAPI_ATTR VkResult VKAPI_CALL hookQueuePresent(VkQueue queue, const VkPresentIn
             } else {
                 for (uint32_t f = 0; f < d->families.size(); ++f)
                     if (d->families[f].queueFlags & VK_QUEUE_GRAPHICS_BIT) { family = f; break; }
-                XLOGW("present queue family unknown; assuming %u", family);
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    XLOGW("present queue family unknown; assuming %u", family);
+                }
             }
         }
         bool first = true;
@@ -452,7 +500,11 @@ VKAPI_ATTR VkResult VKAPI_CALL hookQueuePresent(VkQueue queue, const VkPresentIn
             if (failed == VK_SUCCESS) signals.push_back(signal);
         }
         if (failed != VK_SUCCESS) {
-            result = failed;
+            // Nothing can be presented from here; DEVICE_LOST is the only error that fits.
+            XLOGE("upscale submit failed (%d); reporting VK_ERROR_DEVICE_LOST", static_cast<int>(failed));
+            result = VK_ERROR_DEVICE_LOST;
+            if (pi->pResults)
+                for (uint32_t i = 0; i < pi->swapchainCount; ++i) pi->pResults[i] = result;
         } else {
             VkPresentInfoKHR forwarded = *pi;
             forwarded.waitSemaphoreCount = static_cast<uint32_t>(signals.size());

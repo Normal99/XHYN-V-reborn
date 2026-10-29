@@ -29,6 +29,7 @@ struct Options {
     std::vector<std::string> ignoreVuids;
     uint32_t frames = 6;
     bool checkDiagnostics = false;
+    bool diagnosticsBypassed = false;
 };
 
 int g_validationErrors = 0;
@@ -347,6 +348,7 @@ int main(int argc, char** argv) {
         else if (a == "--validate") o.validate = true;
         else if (a == "--recreate") o.recreate = true;
         else if (a == "--diag") o.checkDiagnostics = true;
+        else if (a == "--diag-bypassed") { o.checkDiagnostics = true; o.diagnosticsBypassed = true; }
         else if (a == "--pattern") o.pattern = next();
         else if (a == "--image") o.image = next();
         else if (a == "--ignore") g_ignoredIds.push_back(next());
@@ -365,10 +367,6 @@ int main(int argc, char** argv) {
     auto diagnostics = reinterpret_cast<int (*)(int, int, int)>(dlsym(vk.shim, "BCnLayer_Diagnostics"));
     CHECK(vk.shimGipa && vk.shimGdpa && diagnostics, "shim does not export the three BCnLayer_* symbols");
     if (!vk.shimGipa || !vk.shimGdpa) return 2;
-    if (o.checkDiagnostics) {
-        const int v = diagnostics(1, 2, 3);
-        CHECK(v == 123 + 4200, "BCnLayer_Diagnostics forwarding returned %d", v);
-    }
 
     // --- instance, the way LayerCreateInstance builds it ---
     const char* extensions[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME, VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
@@ -386,6 +384,12 @@ int main(int argc, char** argv) {
     ici.ppEnabledLayerNames = layers;
     auto createInstance = reinterpret_cast<PFN_vkCreateInstance>(vk.shimGipa(VK_NULL_HANDLE, "vkCreateInstance"));
     VK_OK(createInstance(&ici, nullptr, &vk.instance));
+    if (o.checkDiagnostics) {
+        // Forwarded to the original layer only when the instance went through it, else a stub (0).
+        const int v = diagnostics(1, 2, 3);
+        const int expected = o.diagnosticsBypassed ? 0 : 123 + 4200;
+        CHECK(v == expected, "BCnLayer_Diagnostics returned %d, expected %d", v, expected);
+    }
 
     auto createMessenger = instanceFn<PFN_vkCreateDebugUtilsMessengerEXT>(vk, "vkCreateDebugUtilsMessengerEXT");
     VkDebugUtilsMessengerCreateInfoEXT mci{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};

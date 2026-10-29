@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "log.h"
@@ -79,21 +80,49 @@ FxPlan planFx(DeviceInfo& d, const VkSwapchainCreateInfoKHR& ci, const Config& c
         plan.reason = "surface does not support the needed image usage";
         return plan;
     }
+    // Once the real swapchain exists the game's old one is retired, so every check that can
+    // reject the upscaler has to happen before that.
+    if (plan.out.width < ci.imageExtent.width || plan.out.height < ci.imageExtent.height ||
+        plan.out.width < caps.minImageExtent.width || plan.out.height < caps.minImageExtent.height) {
+        plan.reason = "output size is below the game's size or the surface minimum";
+        return plan;
+    }
+    if (!d.instance->getImageFormatProperties || !d.instance->getFormatProperties) {
+        plan.reason = "instance lacks format query functions";
+        return plan;
+    }
+    VkFormatProperties twin{}, target{};
+    d.instance->getFormatProperties(d.physical, unormTwin(ci.imageFormat), &twin);
+    d.instance->getFormatProperties(d.physical, ci.imageFormat, &target);
+    const VkFormatFeatureFlags sampled = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    if ((twin.optimalTilingFeatures & sampled) != sampled ||
+        !(target.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {
+        plan.reason = "format cannot be sampled/rendered as needed";
+        return plan;
+    }
+    VkImageFormatProperties image{};
+    const VkImageUsageFlags gameUsage = ci.imageUsage | VK_IMAGE_USAGE_SAMPLED_BIT |
+                                        (config.dumpFrame ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
+    if (d.instance->getImageFormatProperties(d.physical, ci.imageFormat, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
+                                             gameUsage, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, &image) != VK_SUCCESS ||
+        image.maxExtent.width < ci.imageExtent.width || image.maxExtent.height < ci.imageExtent.height) {
+        plan.reason = "device cannot create the game's image with sampling usage";
+        return plan;
+    }
     plan.ok = true;
     return plan;
 }
 
-std::unique_ptr<SwapchainFx> SwapchainFx::create(DeviceInfo& device, VkSwapchainKHR chain,
-                                                 const VkSwapchainCreateInfoKHR& ci, VkExtent2D out,
-                                                 const Config& config) {
-    std::unique_ptr<SwapchainFx> fx(new SwapchainFx(device, chain, ci, out, config));
-    if (!fx->init(ci)) return nullptr;
+std::unique_ptr<SwapchainFx> SwapchainFx::create(DeviceInfo& device, const VkSwapchainCreateInfoKHR& ci,
+                                                 VkExtent2D out, const Config& config) {
+    std::unique_ptr<SwapchainFx> fx(new SwapchainFx(device, ci, out, config));
+    if (!fx->prepare()) return nullptr;
     return fx;
 }
 
-SwapchainFx::SwapchainFx(DeviceInfo& device, VkSwapchainKHR chain, const VkSwapchainCreateInfoKHR& ci,
-                         VkExtent2D out, const Config& config)
-    : d_(device), chain_(chain), config_(config), format_(ci.imageFormat), in_(ci.imageExtent), out_(out) {}
+SwapchainFx::SwapchainFx(DeviceInfo& device, const VkSwapchainCreateInfoKHR& ci, VkExtent2D out,
+                         const Config& config)
+    : d_(device), chain_(VK_NULL_HANDLE), config_(config), format_(ci.imageFormat), in_(ci.imageExtent), out_(out) {}
 
 SwapchainFx::~SwapchainFx() { destroy(); }
 
@@ -109,79 +138,10 @@ uint32_t SwapchainFx::memoryType(uint32_t bits, VkMemoryPropertyFlags wanted) co
     return UINT32_MAX;
 }
 
-bool SwapchainFx::init(const VkSwapchainCreateInfoKHR& ci) {
+bool SwapchainFx::prepare() {
     auto& fn = d_.fn;
     const VkDevice dev = d_.handle;
     VkResult r;
-
-    r = d_.innerGetImages(dev, chain_, &count_, nullptr);
-    if (r != VK_SUCCESS || count_ == 0) return fail("count real images", r);
-    real_.resize(count_);
-    r = d_.innerGetImages(dev, chain_, &count_, real_.data());
-    if (r != VK_SUCCESS) return fail("get real images", r);
-
-    // Game-visible images. Same format/usage as the swapchain the game asked for, plus
-    // sampling; MUTABLE_FORMAT lets the UNORM twin view an sRGB image.
-    VkImageFormatListCreateInfo list{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
-    std::vector<VkFormat> listFormats;
-    for (auto* n = static_cast<const VkStructHeader*>(ci.pNext); n; n = static_cast<const VkStructHeader*>(n->pNext)) {
-        if (n->sType != VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO) continue;
-        auto* src = reinterpret_cast<const VkImageFormatListCreateInfo*>(n);
-        listFormats.assign(src->pViewFormats, src->pViewFormats + src->viewFormatCount);
-        break;
-    }
-    const VkFormat twin = unormTwin(format_);
-    const bool haveList = !listFormats.empty();
-    if (haveList) {
-        for (VkFormat f : {format_, twin})
-            if (std::find(listFormats.begin(), listFormats.end(), f) == listFormats.end()) listFormats.push_back(f);
-        list.viewFormatCount = static_cast<uint32_t>(listFormats.size());
-        list.pViewFormats = listFormats.data();
-    }
-
-    VkImageCreateInfo ic{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    ic.pNext = haveList ? &list : nullptr;
-    ic.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
-    ic.imageType = VK_IMAGE_TYPE_2D;
-    ic.format = format_;
-    ic.extent = {in_.width, in_.height, 1};
-    ic.mipLevels = 1;
-    ic.arrayLayers = 1;
-    ic.samples = VK_SAMPLE_COUNT_1_BIT;
-    ic.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ic.usage = ci.imageUsage | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    ic.sharingMode = ci.imageSharingMode;
-    ic.queueFamilyIndexCount = ci.queueFamilyIndexCount;
-    ic.pQueueFamilyIndices = ci.pQueueFamilyIndices;
-    ic.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    game_.assign(count_, VK_NULL_HANDLE);
-    gameMemory_.assign(count_, VK_NULL_HANDLE);
-    gameView_.assign(count_, VK_NULL_HANDLE);
-    for (uint32_t i = 0; i < count_; ++i) {
-        r = fn.vkCreateImage(dev, &ic, nullptr, &game_[i]);
-        if (r != VK_SUCCESS) return fail("create game image", r);
-        VkMemoryRequirements req;
-        fn.vkGetImageMemoryRequirements(dev, game_[i], &req);
-        uint32_t type = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (type == UINT32_MAX) type = memoryType(req.memoryTypeBits, 0);
-        if (type == UINT32_MAX) return fail("no memory type for game image", VK_ERROR_OUT_OF_DEVICE_MEMORY);
-        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        ai.allocationSize = req.size;
-        ai.memoryTypeIndex = type;
-        r = fn.vkAllocateMemory(dev, &ai, nullptr, &gameMemory_[i]);
-        if (r != VK_SUCCESS) return fail("allocate game image memory", r);
-        r = fn.vkBindImageMemory(dev, game_[i], gameMemory_[i], 0);
-        if (r != VK_SUCCESS) return fail("bind game image memory", r);
-
-        VkImageViewCreateInfo vc{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        vc.image = game_[i];
-        vc.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        vc.format = twin;
-        vc.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        r = fn.vkCreateImageView(dev, &vc, nullptr, &gameView_[i]);
-        if (r != VK_SUCCESS) return fail("create game image view", r);
-    }
 
     VkSamplerCreateInfo sc{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     sc.magFilter = sc.minFilter = VK_FILTER_LINEAR;
@@ -207,31 +167,6 @@ bool SwapchainFx::init(const VkSwapchainCreateInfoKHR& ci) {
     plc.pPushConstantRanges = &push;
     r = fn.vkCreatePipelineLayout(dev, &plc, nullptr, &layout_);
     if (r != VK_SUCCESS) return fail("create pipeline layout", r);
-
-    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, count_};
-    VkDescriptorPoolCreateInfo dpc{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpc.maxSets = count_;
-    dpc.poolSizeCount = 1;
-    dpc.pPoolSizes = &poolSize;
-    r = fn.vkCreateDescriptorPool(dev, &dpc, nullptr, &pool_);
-    if (r != VK_SUCCESS) return fail("create descriptor pool", r);
-    std::vector<VkDescriptorSetLayout> layouts(count_, setLayout_);
-    VkDescriptorSetAllocateInfo dsa{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    dsa.descriptorPool = pool_;
-    dsa.descriptorSetCount = count_;
-    dsa.pSetLayouts = layouts.data();
-    set_.resize(count_);
-    r = fn.vkAllocateDescriptorSets(dev, &dsa, set_.data());
-    if (r != VK_SUCCESS) return fail("allocate descriptor sets", r);
-    for (uint32_t i = 0; i < count_; ++i) {
-        VkDescriptorImageInfo info{sampler_, gameView_[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w.dstSet = set_[i];
-        w.descriptorCount = 1;
-        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        w.pImageInfo = &info;
-        fn.vkUpdateDescriptorSets(dev, 1, &w, 0, nullptr);
-    }
 
     VkAttachmentDescription att{};
     att.format = format_;
@@ -338,6 +273,113 @@ bool SwapchainFx::init(const VkSwapchainCreateInfoKHR& ci) {
     fn.vkDestroyShaderModule(dev, frag, nullptr);
     if (r != VK_SUCCESS) return fail("create pipeline", r);
 
+    return true;
+}
+
+bool SwapchainFx::attach(VkSwapchainKHR chain, const VkSwapchainCreateInfoKHR& ci) {
+    chain_ = chain;
+    if (getenv("XHYN_UPSCALE_TEST_FAIL_ATTACH")) return fail("test hook", VK_ERROR_UNKNOWN);  // host tests
+    auto& fn = d_.fn;
+    const VkDevice dev = d_.handle;
+    VkResult r;
+
+    r = d_.innerGetImages(dev, chain_, &count_, nullptr);
+    if (r != VK_SUCCESS || count_ == 0) return fail("count real images", r);
+    real_.resize(count_);
+    r = d_.innerGetImages(dev, chain_, &count_, real_.data());
+    if (r != VK_SUCCESS) return fail("get real images", r);
+
+    // Game-visible images. Same format/usage as the swapchain the game asked for, plus
+    // sampling; MUTABLE_FORMAT lets the UNORM twin view an sRGB image.
+    VkImageFormatListCreateInfo list{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
+    std::vector<VkFormat> listFormats;
+    for (auto* n = static_cast<const VkStructHeader*>(ci.pNext); n; n = static_cast<const VkStructHeader*>(n->pNext)) {
+        if (n->sType != VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO) continue;
+        auto* src = reinterpret_cast<const VkImageFormatListCreateInfo*>(n);
+        listFormats.assign(src->pViewFormats, src->pViewFormats + src->viewFormatCount);
+        break;
+    }
+    const VkFormat twin = unormTwin(format_);
+    const bool haveList = !listFormats.empty();
+    if (haveList) {
+        for (VkFormat f : {format_, twin})
+            if (std::find(listFormats.begin(), listFormats.end(), f) == listFormats.end()) listFormats.push_back(f);
+        list.viewFormatCount = static_cast<uint32_t>(listFormats.size());
+        list.pViewFormats = listFormats.data();
+    }
+
+    VkImageCreateInfo ic{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ic.pNext = haveList ? &list : nullptr;
+    ic.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    ic.imageType = VK_IMAGE_TYPE_2D;
+    ic.format = format_;
+    ic.extent = {in_.width, in_.height, 1};
+    ic.mipLevels = 1;
+    ic.arrayLayers = 1;
+    ic.samples = VK_SAMPLE_COUNT_1_BIT;
+    ic.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ic.usage = ci.imageUsage | VK_IMAGE_USAGE_SAMPLED_BIT | (config_.dumpFrame ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
+    ic.sharingMode = ci.imageSharingMode;
+    ic.queueFamilyIndexCount = ci.queueFamilyIndexCount;
+    ic.pQueueFamilyIndices = ci.pQueueFamilyIndices;
+    ic.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    game_.assign(count_, VK_NULL_HANDLE);
+    gameMemory_.assign(count_, VK_NULL_HANDLE);
+    gameView_.assign(count_, VK_NULL_HANDLE);
+    for (uint32_t i = 0; i < count_; ++i) {
+        r = fn.vkCreateImage(dev, &ic, nullptr, &game_[i]);
+        if (r != VK_SUCCESS) return fail("create game image", r);
+        VkMemoryRequirements req;
+        fn.vkGetImageMemoryRequirements(dev, game_[i], &req);
+        uint32_t type = memoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (type == UINT32_MAX) type = memoryType(req.memoryTypeBits, 0);
+        if (type == UINT32_MAX) return fail("no memory type for game image", VK_ERROR_OUT_OF_DEVICE_MEMORY);
+        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        ai.allocationSize = req.size;
+        ai.memoryTypeIndex = type;
+        r = fn.vkAllocateMemory(dev, &ai, nullptr, &gameMemory_[i]);
+        if (r != VK_SUCCESS) return fail("allocate game image memory", r);
+        r = fn.vkBindImageMemory(dev, game_[i], gameMemory_[i], 0);
+        if (r != VK_SUCCESS) return fail("bind game image memory", r);
+
+        VkImageViewUsageCreateInfo viewUsage{VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO};
+        viewUsage.usage = VK_IMAGE_USAGE_SAMPLED_BIT;  // the twin format need not support the game's other usages
+        VkImageViewCreateInfo vc{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vc.pNext = &viewUsage;
+        vc.image = game_[i];
+        vc.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vc.format = twin;
+        vc.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        r = fn.vkCreateImageView(dev, &vc, nullptr, &gameView_[i]);
+        if (r != VK_SUCCESS) return fail("create game image view", r);
+    }
+
+    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, count_};
+    VkDescriptorPoolCreateInfo dpc{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpc.maxSets = count_;
+    dpc.poolSizeCount = 1;
+    dpc.pPoolSizes = &poolSize;
+    r = fn.vkCreateDescriptorPool(dev, &dpc, nullptr, &pool_);
+    if (r != VK_SUCCESS) return fail("create descriptor pool", r);
+    std::vector<VkDescriptorSetLayout> layouts(count_, setLayout_);
+    VkDescriptorSetAllocateInfo dsa{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dsa.descriptorPool = pool_;
+    dsa.descriptorSetCount = count_;
+    dsa.pSetLayouts = layouts.data();
+    set_.resize(count_);
+    r = fn.vkAllocateDescriptorSets(dev, &dsa, set_.data());
+    if (r != VK_SUCCESS) return fail("allocate descriptor sets", r);
+    for (uint32_t i = 0; i < count_; ++i) {
+        VkDescriptorImageInfo info{sampler_, gameView_[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = set_[i];
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = &info;
+        fn.vkUpdateDescriptorSets(dev, 1, &w, 0, nullptr);
+    }
+
     realView_.assign(count_, VK_NULL_HANDLE);
     framebuffer_.assign(count_, VK_NULL_HANDLE);
     done_.assign(count_, VK_NULL_HANDLE);
@@ -386,8 +428,11 @@ void SwapchainFx::destroy() {
     auto& fn = d_.fn;
     const VkDevice dev = d_.handle;
     // Wait for our own submissions only; the game idles its queues before destroying a swapchain.
+    std::vector<VkFence> pending;
     for (VkFence f : fence_)
-        if (f) fn.vkWaitForFences(dev, 1, &f, VK_TRUE, kFenceTimeoutNs);
+        if (f) pending.push_back(f);
+    if (!pending.empty())
+        fn.vkWaitForFences(dev, static_cast<uint32_t>(pending.size()), pending.data(), VK_TRUE, kFenceTimeoutNs);
     for (auto& entry : families_)
         if (entry.second.pool) fn.vkDestroyCommandPool(dev, entry.second.pool, nullptr);
     families_.clear();
@@ -502,7 +547,11 @@ VkResult SwapchainFx::submit(VkQueue queue, uint32_t familyIndex, uint32_t i, ui
 
     // Reuse of this slot: its previous submission must be finished.
     VkResult r = fn.vkWaitForFences(dev, 1, &fence_[i], VK_TRUE, kFenceTimeoutNs);
-    if (r != VK_SUCCESS) XLOGW("upscale fence wait returned %d", static_cast<int>(r));
+    if (r != VK_SUCCESS) {
+        // Resetting or re-recording work the GPU still owns would be worse than failing the present.
+        XLOGE("upscale fence wait returned %d; not reusing the slot", static_cast<int>(r));
+        return VK_ERROR_DEVICE_LOST;
+    }
     if (timed_[i]) {
         uint64_t ts[2];
         if (fn.vkGetQueryPoolResults(dev, queries_, 2 * i, 2, sizeof ts, ts, sizeof ts[0], VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {

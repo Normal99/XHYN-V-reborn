@@ -19,7 +19,8 @@ XHYN_EXPORT PFN_vkVoidFunction BCnLayer_GetDeviceProcAddr(VkDevice device, const
 }
 
 // BCnLayer_Diagnostics has no public prototype, so it is forwarded with a tail jump
-// that keeps every argument register and the return value untouched.
+// that keeps every argument register and the return value untouched. It goes to the
+// original layer only for instances created through it (layer.cpp), else to a stub.
 extern "C" {
 static void* diagnosticsFallback() { return nullptr; }
 __attribute__((visibility("hidden"))) void* xhyn_diagnostics_target = reinterpret_cast<void*>(&diagnosticsFallback);
@@ -29,7 +30,9 @@ __attribute__((visibility("hidden"))) void* xhyn_diagnostics_target = reinterpre
 asm(".text\n"
     ".globl BCnLayer_Diagnostics\n"
     ".type BCnLayer_Diagnostics,%function\n"
+    ".p2align 2\n"
     "BCnLayer_Diagnostics:\n"
+    "    hint #34\n"  // bti c: a valid indirect-call target if the library is ever built BTI-guarded
     "    adrp x16, xhyn_diagnostics_target\n"
     "    ldr x16, [x16, :lo12:xhyn_diagnostics_target]\n"
     "    br x16\n"
@@ -45,8 +48,9 @@ asm(".text\n"
 #error "unsupported architecture"
 #endif
 
-// Resolve the forwarding target when the library is loaded, before any caller can use it.
-__attribute__((constructor)) static void resolveDiagnostics() {
-    const xhyn::InnerLayer& inner = xhyn::innerLayer();
-    if (inner.diagnostics) xhyn_diagnostics_target = inner.diagnostics;
+namespace xhyn {
+void useInnerDiagnostics(bool inner) {
+    const InnerLayer& layer = innerLayer();
+    xhyn_diagnostics_target = inner && layer.diagnostics ? layer.diagnostics : reinterpret_cast<void*>(&diagnosticsFallback);
 }
+}  // namespace xhyn
