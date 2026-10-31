@@ -12,8 +12,8 @@ is also tested on a software driver with the validation layer (see [Tests](#test
 - **Not FSR 3, FSR 4 or SGSR 2.** Those are temporal upscalers. They need the engine's depth buffer,
   per-pixel motion vectors and camera jitter every frame. This layer only receives the finished
   colour image, so there is nothing to feed them. FSR 4 additionally needs AMD RDNA 4 hardware.
-- **Not frame generation.** That is a separate piece of work planned after upscaling is proven on a
-  device. It would be colour-only interpolation, not FSR 3.
+- **Not FSR 3 frame generation.** `frame_gen` is colour-only interpolation: motion comes from block
+  search on two finished frames, because the layer gets no depth or motion vectors.
 
 ## How it works
 
@@ -126,6 +126,26 @@ adb pull /sdcard/xhyn-upscale-out-600.ppm
 If something fails, send the `adb logcat` output from launch to the failure (`adb logcat -d > crash.log`
 right after a crash). The layer logs every decision and every failed Vulkan call.
 
+## Frame generation
+
+`frame_gen = on` with `mode = sgsr1` shows one interpolated frame before each game frame. It is off by
+default and **has not been run on a phone yet**. Each frame:
+
+1. Quarter-size luma of the game's image, then a block search against the previous frame's luma at
+   one-eighth size (up to about 28 input pixels per frame).
+2. The halfway frame at the game's size, warped from both frames. Where the two disagree, the current
+   frame is used alone.
+3. SGSR 1 from that frame into the image the game acquired, and a present.
+4. A wait of half the frame time (`frame_gen_pacing`), an extra `vkAcquireNextImageKHR`, then SGSR 1 from
+   the game's frame into that image, and a second present.
+
+The real swapchain uses FIFO and one more image than the game asked for, as mailbox would discard the
+generated frame. The game's present fence stays with the first present, so it still fires if the second
+one is dropped. The statistics line reads `[sgsr1+fg]`; its fps is the game's rate, so frames on screen
+are about double, and `generated frame GPU … ms` is the cost per generated frame. Known limits: fast
+pans beyond the search range fall back to the current frame, there is no scene-cut detection, and the HUD
+is interpolated with everything else. Only single-swapchain presents get a generated frame.
+
 ## Settings
 
 `xhyn-upscale.conf` is read from, in order: `$XHYN_UPSCALE_CONF`, the app's external files folder
@@ -141,6 +161,8 @@ re-read each time the game creates a swapchain.
 | `scale` | `1.5` | the game draws at surface size ÷ scale, 1.0–4.0 |
 | `render_width`, `render_height` | unset | exact size for the game to draw at (both required); overrides `preset` and `scale` |
 | `out_width`, `out_height` | unset | explicit output size (both required); replaces the surface's size |
+| `frame_gen` | `off` | one interpolated frame before each game frame; needs `mode = sgsr1` |
+| `frame_gen_pacing` | `true` | evenly space the generated and real frames |
 | `edge_sharpness` | `2.0` | SGSR 1 sharpening, 1.0–2.0 |
 | `edge_threshold` | `8` | SGSR 1 edge threshold in 1/255 steps |
 | `edge_direction` | `false` | SGSR 1 edge-direction variant (slightly better edges, small extra cost) |

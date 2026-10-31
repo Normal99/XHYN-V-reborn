@@ -12,7 +12,8 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SHADERS = [('kFullscreenVert', 'fullscreen.vert'), ('kSgsr1Frag', 'sgsr1.frag')]
+SHADERS = [('kFullscreenVert', 'fullscreen.vert'), ('kSgsr1Frag', 'sgsr1.frag'), ('kFgLumaFrag', 'fg_luma.frag'),
+           ('kFgMotionFrag', 'fg_motion.frag'), ('kFgInterpolateFrag', 'fg_interpolate.frag')]
 
 
 def compile_spirv(source, output):

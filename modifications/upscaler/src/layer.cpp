@@ -274,6 +274,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hookCreateDevice(VkPhysicalDevice physical, const
         d->innerDestroySwapchain = PFN_CAST(vkDestroySwapchainKHR, d->innerGdpa(*out, "vkDestroySwapchainKHR"));
         d->innerGetImages = PFN_CAST(vkGetSwapchainImagesKHR, d->innerGdpa(*out, "vkGetSwapchainImagesKHR"));
         d->innerPresent = PFN_CAST(vkQueuePresentKHR, d->innerGdpa(*out, "vkQueuePresentKHR"));
+        d->innerAcquire = PFN_CAST(vkAcquireNextImageKHR, d->innerGdpa(*out, "vkAcquireNextImageKHR"));
         if (!d->innerCreateSwapchain || !d->innerDestroySwapchain || !d->innerGetImages || !d->innerPresent)
             d->fnComplete = false;  // device was created without VK_KHR_swapchain
     }
@@ -439,7 +440,16 @@ VKAPI_ATTR VkResult VKAPI_CALL hookCreateSwapchain(VkDevice device, const VkSwap
     real.imageExtent = plan.out;
     real.imageUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (config.dumpFrame) real.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    VkResult r = d->innerCreateSwapchain(device, &real, alloc, out);
+    real.minImageCount = plan.minImages;
+    // Mailbox would throw away the generated frame when the real one follows it. The game's list of
+    // allowed present modes has to go too, as FIFO may not be on it.
+    const void* presentModes = nullptr;
+    if (config.frameGen) {
+        real.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+        for (auto* n = static_cast<const VkStructHeader*>(ci->pNext); n; n = static_cast<const VkStructHeader*>(n->pNext))
+            if (static_cast<int>(n->sType) == 1000275002) presentModes = n;  // VkSwapchainPresentModesCreateInfoEXT
+    }
+    VkResult r = withoutLink(&real, presentModes, [&] { return d->innerCreateSwapchain(device, &real, alloc, out); });
     if (r != VK_SUCCESS) {
         // Last resort: the game's own request (its oldSwapchain may already count as retired).
         XLOGW("real swapchain at %ux%u failed (%d); retrying at the game's size", plan.out.width, plan.out.height, r);
@@ -495,6 +505,37 @@ VKAPI_ATTR VkResult VKAPI_CALL hookGetSwapchainImages(VkDevice device, VkSwapcha
     return fx ? fx->getImages(count, images) : d->innerGetImages(device, chain, count, images);
 }
 
+// Presents the generated frame, then the game's own frame on an extra image. The caller's pNext (such
+// as a present fence) stays with the first present, so it still fires if the second one has to be dropped.
+VkResult presentWithFrameGen(DeviceInfo* d, VkQueue queue, uint32_t family, const VkPresentInfoKHR* pi, SwapchainFx* fx) {
+    VkSemaphore signal = VK_NULL_HANDLE;
+    const uint32_t source = pi->pImageIndices[0];
+    if (fx->submitGenerated(queue, family, source, pi->waitSemaphoreCount, pi->pWaitSemaphores, &signal) != VK_SUCCESS)
+        return VK_ERROR_DEVICE_LOST;
+    VkPresentInfoKHR first = *pi;
+    first.waitSemaphoreCount = 1;
+    first.pWaitSemaphores = &signal;
+    first.pResults = nullptr;
+    VkResult result = d->innerPresent(queue, &first);
+    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) return result;
+    fx->paceRealFrame();
+
+    uint32_t index = 0;
+    VkSemaphore acquired = VK_NULL_HANDLE;
+    const VkResult ar = fx->acquireReal(&index, &acquired);
+    if (ar == VK_TIMEOUT || ar == VK_NOT_READY) return result;  // this one frame is shown as generated only
+    if (ar != VK_SUCCESS && ar != VK_SUBOPTIMAL_KHR) return ar;
+    if (fx->submit(queue, family, source, index, 1, &acquired, &signal) != VK_SUCCESS) return VK_ERROR_DEVICE_LOST;
+    VkPresentInfoKHR second{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+    second.waitSemaphoreCount = 1;
+    second.pWaitSemaphores = &signal;
+    second.swapchainCount = 1;
+    second.pSwapchains = pi->pSwapchains;
+    second.pImageIndices = &index;
+    const VkResult last = d->innerPresent(queue, &second);
+    return last == VK_SUCCESS ? result : last;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL hookQueuePresent(VkQueue queue, const VkPresentInfoKHR* pi) {
     DeviceInfo* d = deviceForQueue(queue);
     if (!d || !d->innerPresent) return VK_ERROR_DEVICE_LOST;
@@ -536,13 +577,24 @@ VKAPI_ATTR VkResult VKAPI_CALL hookQueuePresent(VkQueue queue, const VkPresentIn
                 }
             }
         }
+        if (pi->swapchainCount == 1 && items[0].fx->frameGenReady()) {
+            result = presentWithFrameGen(d, queue, family, pi, items[0].fx);
+            if (pi->pResults) pi->pResults[0] = result;
+            if (items[0].state->stats.tick(items[0].state->logInterval)) {
+                uint32_t samples = 0, genSamples = 0;
+                const double gpuMs = items[0].fx->takeGpuMs(&samples);
+                const double genMs = items[0].fx->takeGenMs(&genSamples);
+                items[0].state->stats.report("sgsr1+fg", items[0].state->extent, gpuMs, samples, genMs, genSamples);
+            }
+            return result;
+        }
         bool first = true;
         VkResult failed = VK_SUCCESS;
         for (uint32_t i = 0; i < pi->swapchainCount && failed == VK_SUCCESS; ++i) {
             if (!items[i].fx) continue;
             VkSemaphore signal = VK_NULL_HANDLE;
             // The game's wait semaphores are consumed by the first upscale submission.
-            failed = items[i].fx->submit(queue, family, pi->pImageIndices[i], first ? pi->waitSemaphoreCount : 0,
+            failed = items[i].fx->submit(queue, family, pi->pImageIndices[i], pi->pImageIndices[i], first ? pi->waitSemaphoreCount : 0,
                                          first ? pi->pWaitSemaphores : nullptr, &signal);
             first = false;
             if (failed == VK_SUCCESS) signals.push_back(signal);
@@ -566,7 +618,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hookQueuePresent(VkQueue queue, const VkPresentIn
         if (!state || !state->stats.tick(state->logInterval)) continue;
         uint32_t samples = 0;
         const double gpuMs = items[i].fx ? items[i].fx->takeGpuMs(&samples) : 0.0;
-        state->stats.report(items[i].fx ? "sgsr1" : "probe", state->extent, gpuMs, samples);
+        state->stats.report(items[i].fx ? "sgsr1" : "probe", state->extent, gpuMs, samples, 0.0, 0);
     }
     static bool warned = false;
     if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR && !warned) {
@@ -700,10 +752,12 @@ bool PresentStats::tick(uint32_t logInterval) {
     return logInterval && windowFrames >= logInterval;
 }
 
-void PresentStats::report(const char* label, VkExtent2D extent, double gpuMs, uint32_t gpuSamples) {
+void PresentStats::report(const char* label, VkExtent2D extent, double gpuMs, uint32_t gpuSamples, double genMs, uint32_t genSamples) {
     const double mean = windowFrames ? sumMs / windowFrames : 0.0;
-    char gpu[64] = "";
-    if (gpuSamples) snprintf(gpu, sizeof gpu, ", upscale GPU %.3f ms", gpuMs);
+    char gpu[96] = "";
+    int used = 0;
+    if (gpuSamples) used = snprintf(gpu, sizeof gpu, ", upscale GPU %.3f ms", gpuMs);
+    if (genSamples) snprintf(gpu + used, sizeof gpu - used, ", generated frame GPU %.3f ms", genMs);
     XLOGI("[%s] frame %llu: %llu presents, avg %.2f ms (%.1f fps), min %.2f, max %.2f, game size %ux%u%s", label,
           static_cast<unsigned long long>(frames), static_cast<unsigned long long>(windowFrames), mean,
           mean > 0 ? 1000.0 / mean : 0.0, minMs, maxMs, extent.width, extent.height, gpu);

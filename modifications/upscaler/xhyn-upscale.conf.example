@@ -32,6 +32,13 @@ edge_threshold = 8
 # Slightly better edges for a small extra GPU cost.
 edge_direction = false
 
+# Frame generation (needs mode = sgsr1). Shows one interpolated frame before each game frame, which
+# roughly doubles the frames on screen. It adds input lag and costs GPU time, so it works best from a
+# steady 40 fps or more, and artefacts show around the HUD, thin objects and fast camera turns.
+frame_gen = off
+# Keeps the two frames evenly spaced. Turning it off lowers lag a little but looks less smooth.
+frame_gen_pacing = true
+
 # BC texture decoding. auto uses your GPU's hardware BC support and only goes through the
 # original BCn layer when some GPU lacks it. native / inner force one or the other.
 bcn = auto

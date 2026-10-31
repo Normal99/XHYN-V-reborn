@@ -34,7 +34,7 @@ class SwapchainFx;
     X(vkCreateSemaphore) X(vkDestroySemaphore) X(vkCreateFence) X(vkDestroyFence)                 \
     X(vkWaitForFences) X(vkResetFences) X(vkDeviceWaitIdle) X(vkCreateBuffer) X(vkDestroyBuffer)  \
     X(vkGetBufferMemoryRequirements) X(vkBindBufferMemory) X(vkMapMemory) X(vkUnmapMemory)        \
-    X(vkInvalidateMappedMemoryRanges)
+    X(vkInvalidateMappedMemoryRanges) X(vkCmdCopyImage)
 
 struct DeviceFns {
 #define X(name) PFN_##name name = nullptr;
@@ -69,7 +69,7 @@ struct PresentStats {
     // Records one present; returns true when a report is due (every logInterval frames).
     bool tick(uint32_t logInterval);
     // Formats and clears the current window.
-    void report(const char* label, VkExtent2D extent, double gpuMs, uint32_t gpuSamples);
+    void report(const char* label, VkExtent2D extent, double gpuMs, uint32_t gpuSamples, double genMs, uint32_t genSamples);
 };
 
 struct ChainState {
@@ -96,6 +96,7 @@ struct DeviceInfo {
     PFN_vkDestroySwapchainKHR innerDestroySwapchain = nullptr;
     PFN_vkGetSwapchainImagesKHR innerGetImages = nullptr;
     PFN_vkQueuePresentKHR innerPresent = nullptr;
+    PFN_vkAcquireNextImageKHR innerAcquire = nullptr;
 
     VkPhysicalDeviceMemoryProperties memory{};
     VkPhysicalDeviceProperties properties{};

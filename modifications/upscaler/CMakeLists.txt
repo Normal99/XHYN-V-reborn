@@ -19,7 +19,7 @@ set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 option(XHYN_BUILD_TESTS "Build the host test harness (not for Android)" OFF)
 
 add_library(xhyn_shim SHARED
-  src/shim.cpp src/layer.cpp src/sgsr.cpp src/config.cpp src/log.cpp)
+  src/shim.cpp src/layer.cpp src/sgsr.cpp src/framegen.cpp src/config.cpp src/log.cpp)
 target_compile_options(xhyn_shim PRIVATE -Wall -Wextra -Wno-missing-field-initializers -fno-exceptions -fno-rtti)
 target_include_directories(xhyn_shim PRIVATE src)
 

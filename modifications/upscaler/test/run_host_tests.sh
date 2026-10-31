@@ -105,6 +105,22 @@ expect_log render_ignored "not applied"
 run render_probe "$INNER" "$VIA_INNER" $SURFACE XHYN_UPSCALE_MODE=probe -- --pattern flat
 grep -q "render size:" "$OUT/render_probe.log" && bad "render_probe: probe mode changed the reported size" || ok "render_probe: probe mode leaves the reported size alone"
 
+step "Frame generation"
+FG="XHYN_UPSCALE_FRAME_GEN=1 XHYN_UPSCALE_FRAME_GEN_PACING=0"
+run fg_flat "$INNER" "$VIA_INNER" $FG XHYN_UPSCALE_MODE=sgsr1 XHYN_UPSCALE_DUMP_FRAME=3 -- --pattern flat
+expect_log fg_flat "frame generation on"
+expect_log fg_flat "xhyn-upscale-gen-3.ppm"
+check 3 flat 640 360 960 540
+run fg_moving "$INNER" "$VIA_INNER" $FG XHYN_UPSCALE_MODE=sgsr1 XHYN_UPSCALE_DUMP_FRAME=3 -- --pattern moving --rgba
+check 3 moving 640 360 960 540
+run fg_recreate "$INNER" "$VIA_INNER" $FG XHYN_UPSCALE_MODE=sgsr1 -- --pattern edges --recreate
+[ "$(grep -c 'frame generation on' "$OUT/fg_recreate.log")" = 2 ] && ok "resize recreated frame generation" || bad "resize did not recreate frame generation"
+run fg_no_upscale "$INNER" "$VIA_INNER" $FG XHYN_UPSCALE_MODE=sgsr1 XHYN_UPSCALE_SCALE=1.0 -- --pattern flat
+expect_log fg_no_upscale "sgsr1 ready: 640x360 -> 640x360"
+run fg_paced "$INNER" "$VIA_INNER" XHYN_UPSCALE_FRAME_GEN=1 XHYN_UPSCALE_MODE=sgsr1 -- --pattern flat --frames 12
+run fg_off "$INNER" "$VIA_INNER" XHYN_UPSCALE_MODE=sgsr1 -- --pattern flat
+grep -q "frame generation on" "$OUT/fg_off.log" && bad "fg_off: on without being asked" || ok "fg_off: off by default"
+
 step "SGSR 1: setup failing after the real swapchain exists, on a resize"
 # The enlarged swapchain must be replaced by one of the game's size using it as oldSwapchain;
 # the validation layer flags reuse of a retired oldSwapchain.

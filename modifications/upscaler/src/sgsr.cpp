@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 
 #include "log.h"
 #include "loader_abi.h"
@@ -74,7 +75,12 @@ FxPlan planFx(DeviceInfo& d, const VkSwapchainCreateInfoKHR& ci, const Config& c
     const double fit = std::min(1.0, std::min<double>(caps.maxImageExtent.width / w, caps.maxImageExtent.height / h));
     plan.out.width = std::max<uint32_t>(1, static_cast<uint32_t>(w * fit));
     plan.out.height = std::max<uint32_t>(1, static_cast<uint32_t>(h * fit));
-    if (plan.out.width <= ci.imageExtent.width && plan.out.height <= ci.imageExtent.height) {
+    plan.minImages = ci.minImageCount;
+    if (config.frameGen) {
+        plan.minImages = caps.maxImageCount ? std::min(ci.minImageCount + 1, caps.maxImageCount) : ci.minImageCount + 1;
+    }
+    // Frame generation is worth having without any upscaling, so it may keep the game's size.
+    if (!config.frameGen && plan.out.width <= ci.imageExtent.width && plan.out.height <= ci.imageExtent.height) {
         plan.reason = "output would not be larger than the game's swapchain";
         return plan;
     }
@@ -106,7 +112,7 @@ FxPlan planFx(DeviceInfo& d, const VkSwapchainCreateInfoKHR& ci, const Config& c
     }
     VkImageFormatProperties image{};
     const VkImageUsageFlags gameUsage = ci.imageUsage | VK_IMAGE_USAGE_SAMPLED_BIT |
-                                        (config.dumpFrame ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
+                                        (config.dumpFrame || config.frameGen ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
     if (d.instance->getImageFormatProperties(d.physical, ci.imageFormat, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL,
                                              gameUsage, VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, &image) != VK_SUCCESS ||
         image.maxExtent.width < ci.imageExtent.width || image.maxExtent.height < ci.imageExtent.height) {
@@ -322,7 +328,8 @@ bool SwapchainFx::attach(VkSwapchainKHR chain, const VkSwapchainCreateInfoKHR& c
     ic.arrayLayers = 1;
     ic.samples = VK_SAMPLE_COUNT_1_BIT;
     ic.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ic.usage = ci.imageUsage | VK_IMAGE_USAGE_SAMPLED_BIT | (config_.dumpFrame ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
+    ic.usage = ci.imageUsage | VK_IMAGE_USAGE_SAMPLED_BIT |
+               (config_.dumpFrame || config_.frameGen ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0);
     ic.sharingMode = ci.imageSharingMode;
     ic.queueFamilyIndexCount = ci.queueFamilyIndexCount;
     ic.pQueueFamilyIndices = ci.pQueueFamilyIndices;
@@ -359,9 +366,21 @@ bool SwapchainFx::attach(VkSwapchainKHR chain, const VkSwapchainCreateInfoKHR& c
         if (r != VK_SUCCESS) return fail("create game image view", r);
     }
 
-    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, count_};
+    if (config_.frameGen) {
+        if (!d_.innerAcquire) return fail("frame generation needs vkAcquireNextImageKHR", VK_ERROR_UNKNOWN);
+        fg_ = FrameGen::create(d_, twin, in_, sampler_, gameView_);
+        if (!fg_) return fail("create frame generation resources", VK_ERROR_UNKNOWN);
+        acquireSemaphores_.assign(count_ + 2, VK_NULL_HANDLE);
+        VkSemaphoreCreateInfo semc{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        for (VkSemaphore& s : acquireSemaphores_) {
+            r = fn.vkCreateSemaphore(dev, &semc, nullptr, &s);
+            if (r != VK_SUCCESS) return fail("create acquire semaphore", r);
+        }
+    }
+
+    VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, count_ + 1};
     VkDescriptorPoolCreateInfo dpc{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpc.maxSets = count_;
+    dpc.maxSets = count_ + 1;
     dpc.poolSizeCount = 1;
     dpc.pPoolSizes = &poolSize;
     r = fn.vkCreateDescriptorPool(dev, &dpc, nullptr, &pool_);
@@ -384,11 +403,28 @@ bool SwapchainFx::attach(VkSwapchainKHR chain, const VkSwapchainCreateInfoKHR& c
         fn.vkUpdateDescriptorSets(dev, 1, &w, 0, nullptr);
     }
 
+    if (fg_) {
+        VkDescriptorSetAllocateInfo gsa{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        gsa.descriptorPool = pool_;
+        gsa.descriptorSetCount = 1;
+        gsa.pSetLayouts = &setLayout_;
+        r = fn.vkAllocateDescriptorSets(dev, &gsa, &generatedSet_);
+        if (r != VK_SUCCESS) return fail("allocate generated frame descriptor set", r);
+        VkDescriptorImageInfo info{sampler_, fg_->generatedView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = generatedSet_;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        w.pImageInfo = &info;
+        fn.vkUpdateDescriptorSets(dev, 1, &w, 0, nullptr);
+    }
+
     realView_.assign(count_, VK_NULL_HANDLE);
     framebuffer_.assign(count_, VK_NULL_HANDLE);
     done_.assign(count_, VK_NULL_HANDLE);
     fence_.assign(count_, VK_NULL_HANDLE);
     timed_.assign(count_, false);
+    timedGen_.assign(count_, false);
     for (uint32_t i = 0; i < count_; ++i) {
         VkImageViewCreateInfo vc{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         vc.image = real_[i];
@@ -421,9 +457,10 @@ bool SwapchainFx::attach(VkSwapchainKHR chain, const VkSwapchainCreateInfoKHR& c
         qc.queryCount = 2 * count_;
         if (fn.vkCreateQueryPool(dev, &qc, nullptr, &queries_) != VK_SUCCESS) queries_ = VK_NULL_HANDLE;
     }
-    XLOGI("sgsr1 ready: %ux%u -> %ux%u (x%.2f), %u images, format %d%s%s", in_.width, in_.height, out_.width,
+    XLOGI("sgsr1 ready: %ux%u -> %ux%u (x%.2f), %u images, format %d%s%s%s", in_.width, in_.height, out_.width,
           out_.height, static_cast<double>(out_.width) / in_.width, count_, static_cast<int>(format_),
-          isSrgb(format_) ? " (sRGB output encode)" : "", queries_ ? ", GPU timing on" : "");
+          isSrgb(format_) ? " (sRGB output encode)" : "", queries_ ? ", GPU timing on" : "",
+          fg_ ? ", frame generation on" : "");
     return true;
 }
 
@@ -441,6 +478,8 @@ void SwapchainFx::destroy() {
         if (entry.second.pool) fn.vkDestroyCommandPool(dev, entry.second.pool, nullptr);
     families_.clear();
     if (queries_) fn.vkDestroyQueryPool(dev, queries_, nullptr);
+    fg_.reset();
+    for (VkSemaphore s : acquireSemaphores_) if (s) fn.vkDestroySemaphore(dev, s, nullptr);
     for (VkFence f : fence_) if (f) fn.vkDestroyFence(dev, f, nullptr);
     for (VkSemaphore s : done_) if (s) fn.vkDestroySemaphore(dev, s, nullptr);
     for (VkFramebuffer f : framebuffer_) if (f) fn.vkDestroyFramebuffer(dev, f, nullptr);
@@ -507,10 +546,10 @@ bool SwapchainFx::createHostBuffer(VkDeviceSize size, VkBuffer* buffer, VkDevice
     return fn.vkBindBufferMemory(d_.handle, *buffer, *memory, 0) == VK_SUCCESS;
 }
 
-void SwapchainFx::writeDump(const char* tag, VkDeviceMemory memory, VkExtent2D extent) const {
+void SwapchainFx::writeDump(const char* tag, VkDeviceMemory memory, VkExtent2D extent, uint64_t frame) const {
     void* mapped = nullptr;
     if (d_.fn.vkMapMemory(d_.handle, memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) return;
-    const std::string path = config_.dumpDir + "/xhyn-upscale-" + tag + "-" + std::to_string(presents_) + ".ppm";
+    const std::string path = config_.dumpDir + "/xhyn-upscale-" + tag + "-" + std::to_string(frame) + ".ppm";
     if (FILE* f = fopen(path.c_str(), "wb")) {
         fprintf(f, "P6\n%u %u\n255\n", extent.width, extent.height);
         const auto* px = static_cast<const uint8_t*>(mapped);
@@ -540,16 +579,18 @@ double SwapchainFx::takeGpuMs(uint32_t* samples) {
     return mean;
 }
 
-VkResult SwapchainFx::submit(VkQueue queue, uint32_t familyIndex, uint32_t i, uint32_t waitCount,
-                             const VkSemaphore* waits, VkSemaphore* signal) {
-    if (i >= count_) return VK_ERROR_OUT_OF_DATE_KHR;
+double SwapchainFx::takeGenMs(uint32_t* samples) {
+    *samples = genSamples_;
+    const double mean = genSamples_ ? genSumMs_ / genSamples_ : 0.0;
+    genSumMs_ = 0;
+    genSamples_ = 0;
+    return mean;
+}
+
+// Reuse of a real image's slot: its previous submission must be finished.
+VkResult SwapchainFx::claimSlot(uint32_t i, Family* fam) {
     auto& fn = d_.fn;
     const VkDevice dev = d_.handle;
-    Family* fam = family(familyIndex);
-    if (!fam) return VK_ERROR_INITIALIZATION_FAILED;
-    ++presents_;
-
-    // Reuse of this slot: its previous submission must be finished.
     VkResult r = fn.vkWaitForFences(dev, 1, &fence_[i], VK_TRUE, kFenceTimeoutNs);
     if (r != VK_SUCCESS) {
         // Resetting or re-recording work the GPU still owns would be worse than failing the present.
@@ -561,12 +602,155 @@ VkResult SwapchainFx::submit(VkQueue queue, uint32_t familyIndex, uint32_t i, ui
         if (fn.vkGetQueryPoolResults(dev, queries_, 2 * i, 2, sizeof ts, ts, sizeof ts[0], VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
             const uint32_t bits = fam->timestampBits;
             const uint64_t mask = bits >= 64 ? ~0ull : ((1ull << bits) - 1);
-            gpuSumMs_ += static_cast<double>((ts[1] - ts[0]) & mask) * d_.properties.limits.timestampPeriod * 1e-6;
-            ++gpuSamples_;
+            const double ms = static_cast<double>((ts[1] - ts[0]) & mask) * d_.properties.limits.timestampPeriod * 1e-6;
+            if (timedGen_[i]) {
+                genSumMs_ += ms;
+                ++genSamples_;
+            } else {
+                gpuSumMs_ += ms;
+                ++gpuSamples_;
+            }
         }
         timed_[i] = false;
     }
     fn.vkResetFences(dev, 1, &fence_[i]);
+    return VK_SUCCESS;
+}
+
+void SwapchainFx::recordUpscale(VkCommandBuffer cmd, uint32_t target, VkDescriptorSet set) {
+    auto& fn = d_.fn;
+    VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rp.renderPass = renderPass_;
+    rp.framebuffer = framebuffer_[target];
+    rp.renderArea = {{0, 0}, out_};
+    fn.vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
+    fn.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+    fn.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set, 0, nullptr);
+    const float viewportInfo[4] = {1.0f / in_.width, 1.0f / in_.height, static_cast<float>(in_.width),
+                                   static_cast<float>(in_.height)};
+    fn.vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof viewportInfo, viewportInfo);
+    fn.vkCmdDraw(cmd, 3, 1, 0, 0);
+    fn.vkCmdEndRenderPass(cmd);
+}
+
+VkResult SwapchainFx::acquireReal(uint32_t* index, VkSemaphore* semaphore) {
+    *semaphore = acquireSemaphores_[nextAcquireSemaphore_];
+    nextAcquireSemaphore_ = (nextAcquireSemaphore_ + 1) % static_cast<uint32_t>(acquireSemaphores_.size());
+    return d_.innerAcquire(d_.handle, chain_, kFenceTimeoutNs, *semaphore, VK_NULL_HANDLE, index);
+}
+
+void SwapchainFx::paceRealFrame() {
+    const auto now = std::chrono::steady_clock::now();
+    if (lastGenerated_.time_since_epoch().count()) {
+        const double ms = std::chrono::duration<double, std::milli>(now - lastGenerated_).count();
+        frameIntervalMs_ = frameIntervalMs_ > 0 ? 0.9 * frameIntervalMs_ + 0.1 * ms : ms;
+    }
+    lastGenerated_ = now;
+    if (config_.frameGenPacing && frameIntervalMs_ > 0)
+        std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(std::min(frameIntervalMs_, 66.0) / 2));
+}
+
+VkResult SwapchainFx::submitGenerated(VkQueue queue, uint32_t familyIndex, uint32_t i, uint32_t waitCount,
+                                      const VkSemaphore* waits, VkSemaphore* signal) {
+    if (i >= count_) return VK_ERROR_OUT_OF_DATE_KHR;
+    auto& fn = d_.fn;
+    const VkDevice dev = d_.handle;
+    Family* fam = family(familyIndex);
+    if (!fam) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = claimSlot(i, fam);
+    if (r != VK_SUCCESS) return r;
+
+    const bool timing = queries_ && fam->timestampBits > 0;
+    const bool dump = config_.dumpFrame && presents_ + 1 == config_.dumpFrame;
+    VkBuffer dumpBuf = VK_NULL_HANDLE;
+    VkDeviceMemory dumpMem = VK_NULL_HANDLE;
+    const bool dumpReady = dump && createHostBuffer(static_cast<VkDeviceSize>(in_.width) * in_.height * 4, &dumpBuf, &dumpMem);
+
+    VkCommandBuffer cmd = fam->buffers[i];
+    fn.vkResetCommandBuffer(cmd, 0);
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    fn.vkBeginCommandBuffer(cmd, &bi);
+    if (timing) {
+        fn.vkCmdResetQueryPool(cmd, queries_, 2 * i, 2);
+        fn.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queries_, 2 * i);
+    }
+    auto barrier = [&](VkImage image, VkImageLayout from, VkImageLayout to, VkPipelineStageFlags srcStage,
+                       VkAccessFlags srcAccess, VkPipelineStageFlags dstStage, VkAccessFlags dstAccess) {
+        VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        b.srcAccessMask = srcAccess;
+        b.dstAccessMask = dstAccess;
+        b.oldLayout = from;
+        b.newLayout = to;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = image;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        fn.vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+    };
+    barrier(game_[i], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT);
+    fg_->recordLuma(cmd, i);
+    fg_->recordInterpolate(cmd, i);
+    recordUpscale(cmd, i, generatedSet_);
+    // The real frame is the previous one from here on; it goes back to the game's layout so the
+    // later submit for it starts from the same state as any other.
+    barrier(game_[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT);
+    fg_->recordHistory(cmd, game_[i]);
+    barrier(game_[i], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
+    if (dumpReady) {
+        barrier(fg_->generatedImage(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {in_.width, in_.height, 1};
+        fn.vkCmdCopyImageToBuffer(cmd, fg_->generatedImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dumpBuf, 1, &copy);
+    }
+    if (timing) fn.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 2 * i + 1);
+    fn.vkEndCommandBuffer(cmd);
+
+    std::vector<VkPipelineStageFlags> stages(waitCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.waitSemaphoreCount = waitCount;
+    si.pWaitSemaphores = waits;
+    si.pWaitDstStageMask = stages.data();
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    si.signalSemaphoreCount = 1;
+    si.pSignalSemaphores = &done_[i];
+    r = fn.vkQueueSubmit(queue, 1, &si, fence_[i]);
+    if (r != VK_SUCCESS) {
+        XLOGE("frame generation submit failed (%d)", static_cast<int>(r));
+        VkSubmitInfo none{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        fn.vkQueueSubmit(queue, 1, &none, fence_[i]);
+    } else {
+        timed_[i] = timing;
+        timedGen_[i] = true;
+        *signal = done_[i];
+    }
+    if (dump) {
+        if (dumpReady && r == VK_SUCCESS && fn.vkWaitForFences(dev, 1, &fence_[i], VK_TRUE, kFenceTimeoutNs) == VK_SUCCESS)
+            writeDump("gen", dumpMem, in_, presents_ + 1);
+        if (dumpBuf) fn.vkDestroyBuffer(dev, dumpBuf, nullptr);
+        if (dumpMem) fn.vkFreeMemory(dev, dumpMem, nullptr);
+    }
+    return r;
+}
+
+VkResult SwapchainFx::submit(VkQueue queue, uint32_t familyIndex, uint32_t source, uint32_t i, uint32_t waitCount,
+                             const VkSemaphore* waits, VkSemaphore* signal) {
+    if (i >= count_ || source >= count_) return VK_ERROR_OUT_OF_DATE_KHR;
+    auto& fn = d_.fn;
+    const VkDevice dev = d_.handle;
+    Family* fam = family(familyIndex);
+    if (!fam) return VK_ERROR_INITIALIZATION_FAILED;
+    ++presents_;
+    VkResult r = claimSlot(i, fam);
+    if (r != VK_SUCCESS) return r;
 
     const bool timing = queries_ && fam->timestampBits > 0;
     const bool dump = config_.dumpFrame && presents_ == config_.dumpFrame;
@@ -604,34 +788,26 @@ VkResult SwapchainFx::submit(VkQueue queue, uint32_t familyIndex, uint32_t i, ui
 
     // The game leaves its image in PRESENT_SRC_KHR, as for any presentable image.
     if (dump && dumpReady) {
-        barrier(game_[i], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        barrier(game_[source], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_ACCESS_TRANSFER_READ_BIT);
         VkBufferImageCopy copy{};
         copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         copy.imageExtent = {in_.width, in_.height, 1};
-        fn.vkCmdCopyImageToBuffer(cmd, game_[i], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dumpBuf[0], 1, &copy);
-        barrier(game_[i], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        fn.vkCmdCopyImageToBuffer(cmd, game_[source], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dumpBuf[0], 1, &copy);
+        barrier(game_[source], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                 VK_ACCESS_SHADER_READ_BIT);
     } else {
-        barrier(game_[i], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        barrier(game_[source], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                 VK_ACCESS_SHADER_READ_BIT);
     }
 
-    VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    rp.renderPass = renderPass_;
-    rp.framebuffer = framebuffer_[i];
-    rp.renderArea = {{0, 0}, out_};
-    fn.vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
-    fn.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
-    fn.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_, 0, 1, &set_[i], 0, nullptr);
-    const float viewportInfo[4] = {1.0f / in_.width, 1.0f / in_.height, static_cast<float>(in_.width),
-                                   static_cast<float>(in_.height)};
-    fn.vkCmdPushConstants(cmd, layout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof viewportInfo, viewportInfo);
-    fn.vkCmdDraw(cmd, 3, 1, 0, 0);
-    fn.vkCmdEndRenderPass(cmd);
+    // The first frame has no previous one to interpolate from, so it only starts the history.
+    const bool startHistory = fg_ && !historyValid_;
+    if (startHistory) fg_->recordLuma(cmd, source);
+    recordUpscale(cmd, i, set_[source]);
 
     if (dump && dumpReady) {
         barrier(real_[i], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -645,8 +821,18 @@ VkResult SwapchainFx::submit(VkQueue queue, uint32_t familyIndex, uint32_t i, ui
                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
     }
     // Give the image back in the layout the game expects for its next frame.
-    barrier(game_[i], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
+    if (startHistory) {
+        barrier(game_[source], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT);
+        fg_->recordHistory(cmd, game_[source]);
+        barrier(game_[source], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
+        historyValid_ = true;
+    } else {
+        barrier(game_[source], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
+    }
     if (timing) fn.vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queries_, 2 * i + 1);
     fn.vkEndCommandBuffer(cmd);
 
@@ -667,13 +853,14 @@ VkResult SwapchainFx::submit(VkQueue queue, uint32_t familyIndex, uint32_t i, ui
         fn.vkQueueSubmit(queue, 1, &none, fence_[i]);
     } else {
         timed_[i] = timing;
+        timedGen_[i] = false;
         *signal = done_[i];
     }
 
     if (dump) {
         if (dumpReady && r == VK_SUCCESS && fn.vkWaitForFences(dev, 1, &fence_[i], VK_TRUE, kFenceTimeoutNs) == VK_SUCCESS) {
-            writeDump("in", dumpMem[0], in_);
-            writeDump("out", dumpMem[1], out_);
+            writeDump("in", dumpMem[0], in_, presents_);
+            writeDump("out", dumpMem[1], out_, presents_);
         }
         for (int k = 0; k < 2; ++k) {
             if (dumpBuf[k]) fn.vkDestroyBuffer(dev, dumpBuf[k], nullptr);

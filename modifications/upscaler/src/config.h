@@ -30,6 +30,9 @@ struct Config {
     float edgeSharpness = 2.0f;   // 1.0 .. 2.0
     float edgeThreshold = 8.0f;   // in 1/255 steps; 4 suggested for VR, 8 for phones
     bool edgeDirection = false;
+    // Presents one interpolated frame before each game frame. Needs mode sgsr1.
+    bool frameGen = false;
+    bool frameGenPacing = true;   // show the two frames evenly spaced instead of back to back
     bool gpuTiming = true;
     uint32_t logInterval = 300;   // presents between statistics lines; 0 disables
     uint32_t dumpFrame = 0;       // write input/output PPM files at this present; 0 disables

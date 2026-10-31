@@ -71,7 +71,13 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBits
 }
 
 // Test image, RGB 0..255 at (x, y) in a w*h picture.
-void patternPixel(const std::string& pattern, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t rgb[3]) {
+void patternPixel(const std::string& pattern, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t rgb[3], uint32_t frame = 0) {
+    if (pattern == "moving") {  // a white box that moves 16 pixels right every frame
+        const uint32_t left = 100 + 16 * frame;
+        const bool box = x >= left && x < left + 48 && y >= 100 && y < 148;
+        rgb[0] = rgb[1] = rgb[2] = box ? 255 : 30;
+        return;
+    }
     if (pattern == "flat") {
         rgb[0] = 100; rgb[1] = 150; rgb[2] = 200;
         return;
@@ -278,6 +284,22 @@ void runSwapchain(Vk& vk, const Options& o, uint32_t width, uint32_t height, VkS
 
     for (uint32_t frame = 0; frame < o.frames; ++frame) {
         const uint32_t slot = frame % ring;
+        if (o.pattern == "moving") {
+            VK_OK(idle(vk.device));
+            VK_OK(mapMem(vk.device, stagingMem, 0, VK_WHOLE_SIZE, 0, &mapped));
+            auto* moving = static_cast<uint8_t*>(mapped);
+            for (uint32_t y = 0; y < height; ++y)
+                for (uint32_t x = 0; x < width; ++x) {
+                    uint8_t rgb[3];
+                    patternPixel(o.pattern, x, y, width, height, rgb, frame);
+                    uint8_t* p = moving + (static_cast<size_t>(y) * width + x) * 4;
+                    p[0] = rgb[0];
+                    p[1] = rgb[1];
+                    p[2] = rgb[2];
+                    p[3] = 255;
+                }
+            unmapMem(vk.device, stagingMem);
+        }
         VK_OK(waitFences(vk.device, 1, &frameFence[slot], VK_TRUE, UINT64_MAX));
         VK_OK(resetFences(vk.device, 1, &frameFence[slot]));
         uint32_t index = 0;

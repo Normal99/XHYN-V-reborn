@@ -5,6 +5,7 @@
 
   check_dump.py DIR FRAME flat  W H OUT_W OUT_H     exact colour preservation
   check_dump.py DIR FRAME edges W H OUT_W OUT_H     structure and sharpness against bilinear
+  check_dump.py DIR FRAME moving W H OUT_W OUT_H    the generated frame shows the box halfway
 
 Also writes PNG copies next to the PPM files for viewing.
 """
@@ -35,6 +36,20 @@ def main():
     result.save(directory / ('out-%s.png' % frame))
     assert source.size == (in_w, in_h), ('input size', source.size)
     assert result.size == (out_w, out_h), ('output size', result.size)
+
+    if kind == 'moving':
+        # The harness box is 48 pixels wide and starts at x = 100 + 16 * frame. FRAME counts from 1
+        # and is the current frame, so the generated one lies 8 pixels behind it.
+        generated = load(directory / ('xhyn-upscale-gen-%s.ppm' % frame))
+        assert generated.size == (in_w, in_h), ('generated size', generated.size)
+        bright = [x for y in range(in_h) for x in range(in_w) if generated.getpixel((x, y))[1] > 200]
+        assert bright, 'generated frame has no box'
+        centre = sum(bright) / len(bright)
+        expected = 100 + 16 * (int(frame) - 1) - 8 + 24
+        print('moving: box centre x=%.1f, expected %d, %d bright pixels (box has %d)' % (centre, expected, len(bright), 48 * 48))
+        assert abs(centre - expected) <= 4, 'box is not halfway between the two frames'
+        assert 0.6 * 48 * 48 <= len(bright) <= 1.3 * 48 * 48, 'box is ghosted or smeared'
+        return
 
     if kind == 'flat':
         expected = (100, 150, 200)

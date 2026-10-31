@@ -78,6 +78,8 @@ void apply(Config& c, const std::string& key, const std::string& value) {
     else if (key == "edge_sharpness") c.edgeSharpness = parseFloat(value, c.edgeSharpness, 1.0f, 2.0f);
     else if (key == "edge_threshold") c.edgeThreshold = parseFloat(value, c.edgeThreshold, 1.0f, 64.0f);
     else if (key == "edge_direction") c.edgeDirection = parseBool(value, c.edgeDirection);
+    else if (key == "frame_gen") c.frameGen = parseBool(value, c.frameGen);
+    else if (key == "frame_gen_pacing") c.frameGenPacing = parseBool(value, c.frameGenPacing);
     else if (key == "gpu_timing") c.gpuTiming = parseBool(value, c.gpuTiming);
     else if (key == "log_interval") c.logInterval = parseUint(value, c.logInterval, 1000000);
     else if (key == "dump_frame") c.dumpFrame = parseUint(value, 0, 1000000);
@@ -153,7 +155,7 @@ Config loadConfig() {
     // Environment overrides are mainly for host tests.
     static const char* const keys[] = {"mode", "bcn", "preset", "scale", "render_width", "render_height", "out_width", "out_height",
                                        "surface_width", "surface_height", "edge_sharpness",
-                                       "edge_threshold", "edge_direction", "gpu_timing",
+                                       "edge_threshold", "edge_direction", "frame_gen", "frame_gen_pacing", "gpu_timing",
                                        "log_interval", "dump_frame", "dump_dir"};
     for (const char* key : keys) {
         std::string name = "XHYN_UPSCALE_";
