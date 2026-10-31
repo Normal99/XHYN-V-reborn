@@ -53,19 +53,23 @@ FxPlan planFx(DeviceInfo& d, const VkSwapchainCreateInfoKHR& ci, const Config& c
     }
     if (ci.imageArrayLayers != 1) { plan.reason = "multi-layer swapchain"; return plan; }
 
-    double w = ci.imageExtent.width, h = ci.imageExtent.height;
-    if (config.outWidth && config.outHeight) {
-        w = config.outWidth;
-        h = config.outHeight;
-    } else {
-        w = std::round(w * config.scale);
-        h = std::round(h * config.scale);
-    }
     VkSurfaceCapabilitiesKHR caps{};
     if (!d.instance->getSurfaceCapabilities ||
         d.instance->getSurfaceCapabilities(d.physical, ci.surface, &caps) != VK_SUCCESS) {
         plan.reason = "surface capabilities query failed";
         return plan;
+    }
+    const VkExtent2D surface = surfaceExtent(config, caps);
+    double w = ci.imageExtent.width, h = ci.imageExtent.height;
+    if (config.outWidth && config.outHeight) {
+        w = config.outWidth;
+        h = config.outHeight;
+    } else if (surface.width != UINT32_MAX) {
+        w = surface.width;
+        h = surface.height;
+    } else {
+        w = std::round(w * config.scale);
+        h = std::round(h * config.scale);
     }
     const double fit = std::min(1.0, std::min<double>(caps.maxImageExtent.width / w, caps.maxImageExtent.height / h));
     plan.out.width = std::max<uint32_t>(1, static_cast<uint32_t>(w * fit));

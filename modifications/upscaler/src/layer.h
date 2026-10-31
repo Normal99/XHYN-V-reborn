@@ -55,6 +55,7 @@ struct InstanceInfo {
     PFN_vkGetPhysicalDeviceFormatProperties getFormatProperties = nullptr;
     PFN_vkGetPhysicalDeviceImageFormatProperties getImageFormatProperties = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR getSurfaceCapabilities = nullptr;
+    PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR getSurfaceCapabilities2 = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceFormatsKHR getSurfaceFormats = nullptr;
     PFN_vkGetPhysicalDeviceSurfacePresentModesKHR getPresentModes = nullptr;
 };
@@ -104,6 +105,12 @@ struct DeviceInfo {
     std::unordered_map<VkQueue, uint32_t> queueFamily;
     std::unordered_map<uint64_t, std::unique_ptr<ChainState>> chains;
 };
+
+// The surface's own size; width is UINT32_MAX when the surface has no fixed size.
+inline VkExtent2D surfaceExtent(const Config& config, const VkSurfaceCapabilitiesKHR& caps) {
+    if (config.surfaceWidth && config.surfaceHeight) return {config.surfaceWidth, config.surfaceHeight};
+    return caps.currentExtent;
+}
 
 // Layer entry points exposed through BCnLayer_Get*ProcAddr (shim.cpp).
 PFN_vkVoidFunction layerGetInstanceProcAddr(VkInstance instance, const char* name);

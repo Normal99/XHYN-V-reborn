@@ -92,6 +92,19 @@ run sgsr1_recreate "$INNER" "$VIA_INNER" XHYN_UPSCALE_MODE=sgsr1 -- --pattern ed
 run sgsr1_explicit_size "$INNER" "$VIA_INNER" XHYN_UPSCALE_MODE=sgsr1 XHYN_UPSCALE_OUT_WIDTH=1280 XHYN_UPSCALE_OUT_HEIGHT=720 XHYN_UPSCALE_DUMP_FRAME=3 -- --pattern edges
 check 3 edges 640 360 1280 720
 
+step "SGSR 1: render size reported to the game, output at the surface size"
+SURFACE="XHYN_UPSCALE_SURFACE_WIDTH=960 XHYN_UPSCALE_SURFACE_HEIGHT=540"
+run render_preset "$INNER" "$VIA_INNER" $SURFACE XHYN_UPSCALE_MODE=sgsr1 XHYN_UPSCALE_PRESET=balanced XHYN_UPSCALE_DUMP_FRAME=3 -- --pattern edges --size-from-caps
+expect_log render_preset "render size: reporting 640x360 for a 960x540 surface"
+expect_log render_preset "sgsr1 ready: 640x360 -> 960x540"
+check 3 edges 640 360 960 540
+run render_explicit "$INNER" "$VIA_INNER" $SURFACE XHYN_UPSCALE_MODE=sgsr1 XHYN_UPSCALE_RENDER_WIDTH=800 XHYN_UPSCALE_RENDER_HEIGHT=450 -- --pattern edges --size-from-caps
+expect_log render_explicit "sgsr1 ready: 800x450 -> 960x540"
+run render_ignored "$INNER" "$VIA_INNER" $SURFACE XHYN_UPSCALE_MODE=sgsr1 -- --pattern edges --size 960x540
+expect_log render_ignored "not applied"
+run render_probe "$INNER" "$VIA_INNER" $SURFACE XHYN_UPSCALE_MODE=probe -- --pattern flat
+grep -q "render size:" "$OUT/render_probe.log" && bad "render_probe: probe mode changed the reported size" || ok "render_probe: probe mode leaves the reported size alone"
+
 step "SGSR 1: setup failing after the real swapchain exists, on a resize"
 # The enlarged swapchain must be replaced by one of the game's size using it as oldSwapchain;
 # the validation layer flags reuse of a retired oldSwapchain.

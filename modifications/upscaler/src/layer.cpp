@@ -8,6 +8,8 @@
 #include <dlfcn.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
@@ -205,6 +207,7 @@ VKAPI_ATTR VkResult VKAPI_CALL hookCreateInstance(const VkInstanceCreateInfo* ci
     info->getFormatProperties = PFN_CAST(vkGetPhysicalDeviceFormatProperties, lower(*out, "vkGetPhysicalDeviceFormatProperties"));
     info->getImageFormatProperties = PFN_CAST(vkGetPhysicalDeviceImageFormatProperties, lower(*out, "vkGetPhysicalDeviceImageFormatProperties"));
     info->getSurfaceCapabilities = PFN_CAST(vkGetPhysicalDeviceSurfaceCapabilitiesKHR, lower(*out, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
+    info->getSurfaceCapabilities2 = PFN_CAST(vkGetPhysicalDeviceSurfaceCapabilities2KHR, lower(*out, "vkGetPhysicalDeviceSurfaceCapabilities2KHR"));
     info->getSurfaceFormats = PFN_CAST(vkGetPhysicalDeviceSurfaceFormatsKHR, lower(*out, "vkGetPhysicalDeviceSurfaceFormatsKHR"));
     info->getPresentModes = PFN_CAST(vkGetPhysicalDeviceSurfacePresentModesKHR, lower(*out, "vkGetPhysicalDeviceSurfacePresentModesKHR"));
     XLOGI("instance created, mode=%s, bcn=%s: %s; settings: %s", modeName(config.mode), bcnName(config.bcn), route,
@@ -342,6 +345,51 @@ VKAPI_ATTR void VKAPI_CALL hookGetDeviceQueue2(VkDevice device, const VkDeviceQu
         std::lock_guard<std::mutex> lock(d->mutex);
         d->queueFamily[*queue] = info->queueFamilyIndex;
     }
+}
+
+// ---- render size ---------------------------------------------------------------------
+
+// DXVK sizes its swapchain from the surface's current extent and stretches the game's frame to
+// fit. Reporting a smaller extent gets the upscaler the game's real pixels; the real swapchain
+// still uses the surface's own size (planFx).
+void reportRenderSize(VkSurfaceCapabilitiesKHR& caps) {
+    const Config config = currentConfig(false);
+    if (config.mode != Mode::Sgsr1) return;
+    const VkExtent2D surface = surfaceExtent(config, caps);
+    if (surface.width == UINT32_MAX) return;
+    VkExtent2D render{};
+    if (config.renderWidth && config.renderHeight) {
+        render = {std::min(config.renderWidth, surface.width), std::min(config.renderHeight, surface.height)};
+    } else {
+        render.width = static_cast<uint32_t>(std::lround(surface.width / config.scale));
+        render.height = static_cast<uint32_t>(std::lround(surface.height / config.scale));
+    }
+    caps.currentExtent = {std::max(render.width, caps.minImageExtent.width), std::max(render.height, caps.minImageExtent.height)};
+    static std::atomic<uint64_t> logged{0};
+    const uint64_t key = (static_cast<uint64_t>(surface.width) << 48) | (static_cast<uint64_t>(surface.height) << 32) |
+                         (static_cast<uint64_t>(caps.currentExtent.width) << 16) | caps.currentExtent.height;
+    if (logged.exchange(key) != key)
+        XLOGI("render size: reporting %ux%u for a %ux%u surface", caps.currentExtent.width, caps.currentExtent.height,
+              surface.width, surface.height);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL hookGetSurfaceCapabilities(VkPhysicalDevice physical, VkSurfaceKHR surface,
+                                                          VkSurfaceCapabilitiesKHR* caps) {
+    InstanceInfo* inst = instanceForPhysical(physical);
+    if (!inst || !inst->getSurfaceCapabilities) return VK_ERROR_INITIALIZATION_FAILED;
+    const VkResult r = inst->getSurfaceCapabilities(physical, surface, caps);
+    if (r == VK_SUCCESS) reportRenderSize(*caps);
+    return r;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL hookGetSurfaceCapabilities2(VkPhysicalDevice physical,
+                                                           const VkPhysicalDeviceSurfaceInfo2KHR* info,
+                                                           VkSurfaceCapabilities2KHR* caps) {
+    InstanceInfo* inst = instanceForPhysical(physical);
+    if (!inst || !inst->getSurfaceCapabilities2) return VK_ERROR_INITIALIZATION_FAILED;
+    const VkResult r = inst->getSurfaceCapabilities2(physical, info, caps);
+    if (r == VK_SUCCESS) reportRenderSize(caps->surfaceCapabilities);
+    return r;
 }
 
 // ---- swapchain -----------------------------------------------------------------------
@@ -618,6 +666,10 @@ PFN_vkVoidFunction layerGetInstanceProcAddr(VkInstance instance, const char* nam
     if (!strcmp(name, "vkGetDeviceProcAddr")) return reinterpret_cast<PFN_vkVoidFunction>(layerGetDeviceProcAddr);
     if (PFN_vkVoidFunction hook = deviceHook(name)) return hook;
     InstanceInfo* info = instance ? findInstance(instance) : nullptr;
+    if (info && !strcmp(name, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") && info->getSurfaceCapabilities)
+        return reinterpret_cast<PFN_vkVoidFunction>(hookGetSurfaceCapabilities);
+    if (info && !strcmp(name, "vkGetPhysicalDeviceSurfaceCapabilities2KHR") && info->getSurfaceCapabilities2)
+        return reinterpret_cast<PFN_vkVoidFunction>(hookGetSurfaceCapabilities2);
     if (info) return orStandIn(name, info->innerGipa(instance, name));
     const InnerLayer& inner = innerLayer();
     if (inner.gipa) return orStandIn(name, inner.gipa(instance, name));

@@ -107,11 +107,13 @@ Stop with Ctrl+C and keep `probe.log`. What it should show, in order:
 If there are no `XHYN-UPSCALE` lines at all, the shim was not loaded: check the BC setting and look
 for `BC decode:` lines.
 
-**Run 2 — upscale:** set `mode = sgsr1`, `scale = 1.5`, and lower the game's own resolution to
-about 1/1.5 of what you want on screen (on the test phone the game renders at 2262x1272 by default, so
-about 1508x848) (the layer upscales whatever size the game renders at). Look for
-`sgsr1 ready: 960x540 -> 1440x810` and the `upscale GPU … ms` figure in the statistics line. If it
-says `not applied: …` the reason is in that line. To inspect the picture, set `dump_frame = 600`,
+**Run 2 — upscale:** set `mode = sgsr1` and a `preset`, or `render_width` and `render_height`, then set
+the game's own resolution to the same size. On the test phone the surface is 2262x1272, so `balanced`
+is 1508x848, or use `render_width = 1600`, `render_height = 900` with the game at 1600x900. Look for
+`render size: reporting 1600x900 for a 2262x1272 surface`, `sgsr1 ready: 1600x900 -> 2262x1272` and
+the `upscale GPU … ms` figure in the statistics line. If it says `not applied: …` the reason is in that
+line. `output would not be larger` right after a full-size `swapchain create` means the game did not use
+the reported size, so it is running without the upscaler. To inspect the picture, set `dump_frame = 600`,
 play past that frame, then:
 
 ```bash
@@ -135,8 +137,10 @@ re-read each time the game creates a swapchain.
 | Key | Default | Meaning |
 |---|---|---|
 | `mode` | `probe` | `off` forwards only; `probe` logs only; `sgsr1` upscales |
-| `scale` | `1.5` | output = game size × scale, 1.0–4.0; capped by the surface's maximum size |
-| `out_width`, `out_height` | unset | explicit output size (both required); overrides `scale` |
+| `preset` | none | `quality` (÷1.3), `balanced` (÷1.5), `performance` (÷1.7), `ultra_performance` (÷2); sets `scale` |
+| `scale` | `1.5` | the game draws at surface size ÷ scale, 1.0–4.0 |
+| `render_width`, `render_height` | unset | exact size for the game to draw at (both required); overrides `preset` and `scale` |
+| `out_width`, `out_height` | unset | explicit output size (both required); replaces the surface's size |
 | `edge_sharpness` | `2.0` | SGSR 1 sharpening, 1.0–2.0 |
 | `edge_threshold` | `8` | SGSR 1 edge threshold in 1/255 steps |
 | `edge_direction` | `false` | SGSR 1 edge-direction variant (slightly better edges, small extra cost) |
@@ -152,6 +156,10 @@ re-read each time the game creates a swapchain.
 - The game's image is left in `PRESENT_SRC_KHR` layout, as for any presentable image; this is used
   on images that are not driver swapchain images, which the validation layer accepts but a driver may
   treat differently. This is the first thing to suspect if the picture is black or corrupted.
+- DXVK stretches the game's frame to the swapchain, and the swapchain follows the surface's current
+  extent, not the game's resolution. So in `sgsr1` mode the layer reports the render size as the current
+  extent. Keep the game's resolution equal to it, or DXVK resamples the frame before the upscaler sees it.
+- If a swapchain cannot be upscaled, it stays at the reported size and Android stretches it to the screen.
 - HDR output (`hdr=true`) is not upscaled; the swapchain format is logged and passed through.
 - The game passes `VkSwapchainPresentModesCreateInfoEXT` (sType 1000275002) and an image format list
   (1000147000); both are forwarded unchanged and do not depend on the image size. If a log ever shows

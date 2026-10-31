@@ -61,7 +61,18 @@ void apply(Config& c, const std::string& key, const std::string& value) {
         else if (m == "inner" || m == "layer") c.bcn = BcnPolicy::Inner;
         else if (m == "native" || m == "bypass") c.bcn = BcnPolicy::Native;
         else XLOGW("unknown bcn policy '%s' (use auto, inner or native)", value.c_str());
+    } else if (key == "preset") {
+        const std::string m = lower(value);
+        if (m == "quality") c.scale = 1.3f;
+        else if (m == "balanced") c.scale = 1.5f;
+        else if (m == "performance") c.scale = 1.7f;
+        else if (m == "ultra_performance") c.scale = 2.0f;
+        else XLOGW("unknown preset '%s' (use quality, balanced, performance or ultra_performance)", value.c_str());
     } else if (key == "scale") c.scale = parseFloat(value, c.scale, 1.0f, 4.0f);
+    else if (key == "render_width") c.renderWidth = parseUint(value, 0, 8192);
+    else if (key == "render_height") c.renderHeight = parseUint(value, 0, 8192);
+    else if (key == "surface_width") c.surfaceWidth = parseUint(value, 0, 8192);
+    else if (key == "surface_height") c.surfaceHeight = parseUint(value, 0, 8192);
     else if (key == "out_width") c.outWidth = parseUint(value, 0, 8192);
     else if (key == "out_height") c.outHeight = parseUint(value, 0, 8192);
     else if (key == "edge_sharpness") c.edgeSharpness = parseFloat(value, c.edgeSharpness, 1.0f, 2.0f);
@@ -140,7 +151,8 @@ Config loadConfig() {
     if (c.source.empty()) c.source = "defaults (no xhyn-upscale.conf found)";
 
     // Environment overrides are mainly for host tests.
-    static const char* const keys[] = {"mode", "bcn", "scale", "out_width", "out_height", "edge_sharpness",
+    static const char* const keys[] = {"mode", "bcn", "preset", "scale", "render_width", "render_height", "out_width", "out_height",
+                                       "surface_width", "surface_height", "edge_sharpness",
                                        "edge_threshold", "edge_direction", "gpu_timing",
                                        "log_interval", "dump_frame", "dump_dir"};
     for (const char* key : keys) {

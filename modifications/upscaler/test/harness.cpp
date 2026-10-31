@@ -30,6 +30,7 @@ struct Options {
     uint32_t frames = 6;
     bool checkDiagnostics = false;
     bool diagnosticsBypassed = false;
+    bool sizeFromCaps = false;  // size the swapchain from the surface's current extent, as DXVK does
 };
 
 int g_validationErrors = 0;
@@ -166,6 +167,11 @@ void runSwapchain(Vk& vk, const Options& o, uint32_t width, uint32_t height, VkS
 
     VkSurfaceCapabilitiesKHR caps;
     VK_OK(getCaps(vk.physical, vk.surface, &caps));
+    if (o.sizeFromCaps) {
+        CHECK(caps.currentExtent.width != UINT32_MAX, "surface reports no current extent");
+        width = caps.currentExtent.width;
+        height = caps.currentExtent.height;
+    }
 
     VkFormat format = o.bgra ? (o.srgb ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM)
                              : (o.srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM);
@@ -353,6 +359,7 @@ int main(int argc, char** argv) {
         else if (a == "--image") o.image = next();
         else if (a == "--ignore") g_ignoredIds.push_back(next());
         else if (a == "--frames") o.frames = atoi(next().c_str());
+        else if (a == "--size-from-caps") o.sizeFromCaps = true;
         else if (a == "--size") sscanf(next().c_str(), "%ux%u", &o.width, &o.height);
         else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
