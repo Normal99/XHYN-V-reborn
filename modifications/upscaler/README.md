@@ -146,6 +146,20 @@ are about double, and `generated frame GPU … ms` is the cost per generated fra
 pans beyond the search range fall back to the current frame, there is no scene-cut detection, and the HUD
 is interpolated with everything else. Only single-swapchain presents get a generated frame.
 
+## In-app menu
+
+`scripts/add_menu.py` adds rows to the launcher's **Graphics → Display** page: upscaling, upscaler input,
+sharpening, frame generation and pacing. They are stored in `[upscaler]` in `Config/android.ini`, which the
+layer reads and which takes priority over `xhyn-upscale.conf`. Run it before `install_shim.py`:
+
+```bash
+python modifications/upscaler/scripts/add_menu.py --apk releases/1.7.4-en/XHYN-V-1.7.4-English.apk \
+  --out with-menu.apk --android-jar /path/to/android-sdk/platforms/android-36/android.jar
+```
+
+Then pass `with-menu.apk` as `--apk` to `install_shim.py`. `preset = game`, the menu's default, reads the
+game's resolution from `save/settings.xml` (read only), so the upscaler always gets the game's real pixels.
+
 ## Settings
 
 `xhyn-upscale.conf` is read from, in order: `$XHYN_UPSCALE_CONF`, the app's external files folder
@@ -157,7 +171,7 @@ re-read each time the game creates a swapchain.
 | Key | Default | Meaning |
 |---|---|---|
 | `mode` | `probe` | `off` forwards only; `probe` logs only; `sgsr1` upscales |
-| `preset` | none | `quality` (÷1.3), `balanced` (÷1.5), `performance` (÷1.7), `ultra_performance` (÷2); sets `scale` |
+| `preset` | none | `game` (the game's own resolution), `quality` (÷1.3), `balanced` (÷1.5), `performance` (÷1.7), `ultra_performance` (÷2); sets `scale` |
 | `scale` | `1.5` | the game draws at surface size ÷ scale, 1.0–4.0 |
 | `render_width`, `render_height` | unset | exact size for the game to draw at (both required); overrides `preset` and `scale` |
 | `out_width`, `out_height` | unset | explicit output size (both required); replaces the surface's size |

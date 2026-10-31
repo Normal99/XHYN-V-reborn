@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <vector>
 
 #include "log.h"
@@ -63,11 +64,12 @@ void apply(Config& c, const std::string& key, const std::string& value) {
         else XLOGW("unknown bcn policy '%s' (use auto, inner or native)", value.c_str());
     } else if (key == "preset") {
         const std::string m = lower(value);
+        c.renderMatchesGame = m == "game";
         if (m == "quality") c.scale = 1.3f;
         else if (m == "balanced") c.scale = 1.5f;
         else if (m == "performance") c.scale = 1.7f;
         else if (m == "ultra_performance") c.scale = 2.0f;
-        else XLOGW("unknown preset '%s' (use quality, balanced, performance or ultra_performance)", value.c_str());
+        else if (m != "game") XLOGW("unknown preset '%s' (use game, quality, balanced, performance or ultra_performance)", value.c_str());
     } else if (key == "scale") c.scale = parseFloat(value, c.scale, 1.0f, 4.0f);
     else if (key == "render_width") c.renderWidth = parseUint(value, 0, 8192);
     else if (key == "render_height") c.renderHeight = parseUint(value, 0, 8192);
@@ -100,6 +102,46 @@ bool readFile(const std::string& path, Config& c) {
     }
     c.source = path;
     return true;
+}
+
+// The launcher's menu stores its rows in [upscaler]. Other sections of this file reuse names
+// such as scale, so only that section is read.
+bool readMenuSettings(const std::string& path, Config& c) {
+    std::ifstream in(path);
+    if (!in) return false;
+    bool inSection = false, found = false;
+    std::string line;
+    while (std::getline(in, line)) {
+        line = trim(line);
+        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+        if (line[0] == '[') {
+            inSection = line == "[upscaler]";
+            found = found || inSection;
+            continue;
+        }
+        const size_t eq = line.find('=');
+        if (inSection && eq != std::string::npos) apply(c, lower(trim(line.substr(0, eq))), trim(line.substr(eq + 1)));
+    }
+    return found;
+}
+
+uint32_t settingsXmlValue(const std::string& xml, const char* tag) {
+    const std::string marker = std::string("<") + tag + " value=\"";
+    const size_t at = xml.find(marker);
+    return at == std::string::npos ? 0 : static_cast<uint32_t>(strtoul(xml.c_str() + at + marker.size(), nullptr, 10));
+}
+
+// Read only: this file is part of the player's save folder.
+void matchGameResolution(const std::string& root, Config& c) {
+    std::ifstream in(root + "/save/settings.xml");
+    const std::string xml((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const uint32_t width = settingsXmlValue(xml, "ScreenWidth"), height = settingsXmlValue(xml, "ScreenHeight");
+    if (width && height) {
+        c.renderWidth = width;
+        c.renderHeight = height;
+    } else {
+        XLOGW("game resolution not found under %s; using scale %.2f", root.c_str(), static_cast<double>(c.scale));
+    }
 }
 
 std::string packageName() {
@@ -152,6 +194,11 @@ Config loadConfig() {
         if (readFile(path, c)) break;
     if (c.source.empty()) c.source = "defaults (no xhyn-upscale.conf found)";
 
+    const char* rootEnv = getenv("GTAV_GAME_ROOT");
+    const std::string root = rootEnv && *rootEnv ? rootEnv : "/storage/emulated/0/Games/GTAV";
+    const std::string menu = root + "/Config/android.ini";
+    if (readMenuSettings(menu, c)) c.source = menu + " [upscaler]";
+
     // Environment overrides are mainly for host tests.
     static const char* const keys[] = {"mode", "bcn", "preset", "scale", "render_width", "render_height", "out_width", "out_height",
                                        "surface_width", "surface_height", "edge_sharpness",
@@ -162,6 +209,7 @@ Config loadConfig() {
         for (const char* p = key; *p; ++p) name += static_cast<char>(toupper(static_cast<unsigned char>(*p)));
         if (const char* v = getenv(name.c_str())) apply(c, key, v);
     }
+    if (c.renderMatchesGame) matchGameResolution(root, c);
     if (c.dumpDir.empty()) {
         // Next to the settings file that was read: that folder is known to be reachable by the app.
         const size_t slash = c.source.rfind('/');

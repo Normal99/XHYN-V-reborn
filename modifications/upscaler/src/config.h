@@ -18,6 +18,7 @@ struct Config {
     // The game is told to draw at surface size / scale, or at render_width x render_height when
     // both are set. On a surface with no fixed size the output is game size * scale instead.
     float scale = 1.5f;
+    bool renderMatchesGame = false;  // preset = game: render_width/height come from the game's settings
     uint32_t renderWidth = 0;
     uint32_t renderHeight = 0;
     // Output is the surface's own size unless both out_width and out_height are set.

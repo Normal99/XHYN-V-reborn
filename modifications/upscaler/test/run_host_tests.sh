@@ -105,6 +105,16 @@ expect_log render_ignored "not applied"
 run render_probe "$INNER" "$VIA_INNER" $SURFACE XHYN_UPSCALE_MODE=probe -- --pattern flat
 grep -q "render size:" "$OUT/render_probe.log" && bad "render_probe: probe mode changed the reported size" || ok "render_probe: probe mode leaves the reported size alone"
 
+step "Settings from the launcher's menu"
+MENU=$OUT/menu-root
+mkdir -p "$MENU/Config" "$MENU/save"
+printf '[overlay]\nscale=85\nmode=off\n\n[upscaler]\nmode=sgsr1\npreset=game\nedge_sharpness=1.5\n\n[other]\nframe_gen=true\n' > "$MENU/Config/android.ini"
+printf '<Settings>\n  <ScreenWidth value="800" />\n  <ScreenHeight value="450" />\n</Settings>\n' > "$MENU/save/settings.xml"
+run menu_settings "$INNER" "$VIA_INNER" $SURFACE GTAV_GAME_ROOT="$MENU" -- --pattern edges --size-from-caps
+expect_log menu_settings "android.ini \[upscaler\]"
+expect_log menu_settings "sgsr1 ready: 800x450 -> 960x540"
+grep -q "frame generation on" "$OUT/menu_settings.log" && bad "menu_settings: read a key from another section" || ok "menu_settings: other sections ignored"
+
 step "Frame generation"
 FG="XHYN_UPSCALE_FRAME_GEN=1 XHYN_UPSCALE_FRAME_GEN_PACING=0"
 run fg_flat "$INNER" "$VIA_INNER" $FG XHYN_UPSCALE_MODE=sgsr1 XHYN_UPSCALE_DUMP_FRAME=3 -- --pattern flat
