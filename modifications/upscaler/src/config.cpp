@@ -149,7 +149,10 @@ Config loadConfig() {
         if (const char* v = getenv(name.c_str())) apply(c, key, v);
     }
     if (c.dumpDir.empty()) {
-        c.dumpDir = pkg.empty() ? "." : "/storage/emulated/0/Android/data/" + pkg + "/files";
+        // Next to the settings file that was read: that folder is known to be reachable by the app.
+        const size_t slash = c.source.rfind('/');
+        if (slash != std::string::npos && c.source[0] == '/') c.dumpDir = c.source.substr(0, slash);
+        else c.dumpDir = pkg.empty() ? "." : "/storage/emulated/0/Android/data/" + pkg + "/files";
     }
     return c;
 }

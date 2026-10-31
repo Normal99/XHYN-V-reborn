@@ -3,9 +3,9 @@
 A Vulkan layer that upscales the game's image with **Snapdragon Game Super Resolution 1**
 (Qualcomm, BSD-3-Clause), so the game can render at a lower resolution and still fill the display.
 
-**Status: not tested on a phone.** The Vulkan side is tested here on a software driver with the
-validation layer (see [Tests](#tests)). Nothing has run on Android, Adreno or the real game yet.
-Treat the first on-device run as a diagnostic: it starts in `probe` mode, which only logs.
+**Status:** `probe` mode has run in the game on a OnePlus PYB110 (Adreno 850, Android 17) for about
+33,000 frames without a crash. `sgsr1` upscaling has not yet been tried on a device. The Vulkan side
+is also tested on a software driver with the validation layer (see [Tests](#tests)).
 
 ## What it is not
 
@@ -77,12 +77,12 @@ prompt.
 
 ```bash
 adb install XHYN-V-sgsr.apk
-adb shell mkdir -p /sdcard/Android/data/com.xhynph.xhynv.reborn174/files
-adb push modifications/upscaler/xhyn-upscale.conf.example \
-  /sdcard/Android/data/com.xhynph.xhynv.reborn174/files/xhyn-upscale.conf
+adb push modifications/upscaler/xhyn-upscale.conf.example /sdcard/xhyn-upscale.conf
 ```
 
-If the push is refused, push to `/sdcard/xhyn-upscale.conf` instead (the launcher has all-files access).
+Use the shared-storage root as above: a file `adb` pushes into `/sdcard/Android/data/<app id>/files/`
+is owned by the shell user and was not readable by the game on the test phone. The launcher has
+all-files access, so `/sdcard/xhyn-upscale.conf` works. Frame dumps are written next to the file read.
 
 In the game's graphics settings set **BC texture decoding → On** and close the app completely.
 
@@ -108,14 +108,15 @@ If there are no `XHYN-UPSCALE` lines at all, the shim was not loaded: check the 
 for `BC decode:` lines.
 
 **Run 2 — upscale:** set `mode = sgsr1`, `scale = 1.5`, and lower the game's own resolution to
-about 1/1.5 of what you want on screen (the layer upscales whatever size the game renders at). Look for
+about 1/1.5 of what you want on screen (on the test phone the game renders at 2262x1272 by default, so
+about 1508x848) (the layer upscales whatever size the game renders at). Look for
 `sgsr1 ready: 960x540 -> 1440x810` and the `upscale GPU … ms` figure in the statistics line. If it
 says `not applied: …` the reason is in that line. To inspect the picture, set `dump_frame = 600`,
 play past that frame, then:
 
 ```bash
-adb pull /sdcard/Android/data/com.xhynph.xhynv.reborn174/files/xhyn-upscale-in-600.ppm
-adb pull /sdcard/Android/data/com.xhynph.xhynv.reborn174/files/xhyn-upscale-out-600.ppm
+adb pull /sdcard/xhyn-upscale-in-600.ppm
+adb pull /sdcard/xhyn-upscale-out-600.ppm
 ```
 
 **Undo:** set `mode = off` (the shim then only forwards), or reinstall the original APK.
@@ -126,7 +127,8 @@ right after a crash). The layer logs every decision and every failed Vulkan call
 ## Settings
 
 `xhyn-upscale.conf` is read from, in order: `$XHYN_UPSCALE_CONF`, the app's external files folder
-(`/sdcard/Android/data/<app id>/files/`), its internal files folder, then `/sdcard/xhyn-upscale.conf`.
+(`/sdcard/Android/data/<app id>/files/`), its internal files folder, then `/sdcard/xhyn-upscale.conf`
+(the one to use with `adb`, see above).
 `XHYN_UPSCALE_<KEY>` environment variables override the file (used by the host tests). The file is
 re-read each time the game creates a swapchain.
 
@@ -141,7 +143,7 @@ re-read each time the game creates a swapchain.
 | `bcn` | `auto` | `auto`, `inner` (always the original layer) or `native` (never) |
 | `log_interval` | `300` | presents between statistics lines, 0 disables |
 | `gpu_timing` | `true` | measure the GPU time of the upscale pass |
-| `dump_frame`, `dump_dir` | `0` | write input/output PPM at that present number |
+| `dump_frame`, `dump_dir` | `0` | write input/output PPM at that present number (default folder: the one the settings file was read from) |
 
 ## Known limits
 
@@ -151,9 +153,15 @@ re-read each time the game creates a swapchain.
   on images that are not driver swapchain images, which the validation layer accepts but a driver may
   treat differently. This is the first thing to suspect if the picture is black or corrupted.
 - HDR output (`hdr=true`) is not upscaled; the swapchain format is logged and passed through.
-- If the probe log shows a swapchain `pNext sType=1000275000` (present scaling), the game asked for a
-  scaling behaviour the layer does not adjust. Send the log; that is a one-line change but needs a
-  device to confirm.
+- The game passes `VkSwapchainPresentModesCreateInfoEXT` (sType 1000275002) and an image format list
+  (1000147000); both are forwarded unchanged and do not depend on the image size. If a log ever shows
+  `VkSwapchainPresentScalingCreateInfoEXT` (sType 1000275004), send it: the layer does not adjust it.
+- The game requests `transform=IDENTITY` while the phone reports a rotated current transform, so the
+  system compositor rotates each frame. That is the game's choice and is unchanged by the layer.
+- DXVK in this build calls `vkCmdSetSampleLocationsEnableEXT`/`vkCmdSetSampleLocationsEXT` without
+  checking that the driver has them; Adreno drivers do not, which crashes the game with or without
+  this layer. The shim returns do-nothing stand-ins for those two (safe with MSAA off, untested with
+  MSAA on), so on affected phones the game now depends on the shim being installed.
 
 ## Tests
 
@@ -173,8 +181,8 @@ sudo apt-get install cmake ninja-build glslang-tools libvulkan-dev vulkan-valida
 modifications/upscaler/test/run_host_tests.sh
 ```
 
-Not covered: Android, Adreno/Mali drivers, the real game, performance, the Android build itself
-(there was no NDK available when this was written; the CI job and `build_android.sh` have not run).
+Not covered by these tests: Android, Adreno/Mali drivers, the real game and performance. The *Build
+upscaler layer* workflow builds the Android library with the NDK and runs these tests on every push.
 
 After editing `shaders/*.glsl`, run `scripts/gen_shaders.py` (needs `glslangValidator`); the test script
 fails if `src/shaders_spv.h` is stale.

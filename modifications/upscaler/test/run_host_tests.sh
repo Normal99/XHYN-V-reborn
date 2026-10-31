@@ -14,6 +14,8 @@ cd "$(dirname "$0")/.."
 BUILD=${BUILD_DIR:-/tmp/xhyn-upscaler-build}
 OUT=$BUILD/out
 export VK_ICD_FILENAMES=${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}
+# Mesa's device-select implicit layer crashes in the stub path on hosts with a real GPU.
+export NODEVICE_SELECT=1
 mkdir -p "$OUT"
 pass=0; fail=0
 
