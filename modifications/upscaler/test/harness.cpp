@@ -447,6 +447,9 @@ int main(int argc, char** argv) {
     dci.ppEnabledExtensionNames = devExt.data();
     auto createDevice = instanceFn<PFN_vkCreateDevice>(vk, "vkCreateDevice");
     VK_OK(createDevice(vk.physical, &dci, nullptr, &vk.device));
+    // DXVK calls these unchecked; the extension is not enabled here, so the driver has nothing to return.
+    CHECK(vk.shimGdpa(vk.device, "vkCmdSetSampleLocationsEnableEXT"), "no stand-in for vkCmdSetSampleLocationsEnableEXT");
+    CHECK(vk.shimGdpa(vk.device, "vkCmdSetSampleLocationsEXT"), "no stand-in for vkCmdSetSampleLocationsEXT");
     deviceFn<PFN_vkGetDeviceQueue>(vk, "vkGetDeviceQueue")(vk.device, vk.family, 0, &vk.queue);
 
     auto createSurface = instanceFn<PFN_vkCreateHeadlessSurfaceEXT>(vk, "vkCreateHeadlessSurfaceEXT");

@@ -553,6 +553,28 @@ PFN_vkVoidFunction deviceHook(const char* name) {
     return nullptr;
 }
 
+// DXVK calls these two without checking the pointers it got, and Adreno drivers return null
+// for them. Sample locations only matter when multisampling, so doing nothing is safe with MSAA off.
+VKAPI_ATTR void VKAPI_CALL standInSetSampleLocationsEnable(VkCommandBuffer, VkBool32) {}
+VKAPI_ATTR void VKAPI_CALL standInSetSampleLocations(VkCommandBuffer, const VkSampleLocationsInfoEXT*) {}
+
+const Hook kStandIns[] = {
+    {"vkCmdSetSampleLocationsEnableEXT", reinterpret_cast<PFN_vkVoidFunction>(standInSetSampleLocationsEnable)},
+    {"vkCmdSetSampleLocationsEXT", reinterpret_cast<PFN_vkVoidFunction>(standInSetSampleLocations)},
+};
+
+PFN_vkVoidFunction orStandIn(const char* name, PFN_vkVoidFunction fn) {
+    if (fn) return fn;
+    for (const Hook& h : kStandIns) {
+        if (!strcmp(h.name, name)) {
+            XLOGW("driver has no %s; using a stand-in that does nothing", name);
+            return h.fn;
+        }
+    }
+    if (!strncmp(name, "vkCmd", 5)) XLOGI("driver has no %s", name);
+    return nullptr;
+}
+
 }  // namespace
 
 DeviceInfo* findDevice(VkDevice device) {
@@ -596,10 +618,10 @@ PFN_vkVoidFunction layerGetInstanceProcAddr(VkInstance instance, const char* nam
     if (!strcmp(name, "vkGetDeviceProcAddr")) return reinterpret_cast<PFN_vkVoidFunction>(layerGetDeviceProcAddr);
     if (PFN_vkVoidFunction hook = deviceHook(name)) return hook;
     InstanceInfo* info = instance ? findInstance(instance) : nullptr;
-    if (info) return info->innerGipa(instance, name);
+    if (info) return orStandIn(name, info->innerGipa(instance, name));
     const InnerLayer& inner = innerLayer();
-    if (inner.gipa) return inner.gipa(instance, name);
-    return g_anyNextGipa ? g_anyNextGipa(instance, name) : nullptr;
+    if (inner.gipa) return orStandIn(name, inner.gipa(instance, name));
+    return orStandIn(name, g_anyNextGipa ? g_anyNextGipa(instance, name) : nullptr);
 }
 
 PFN_vkVoidFunction layerGetDeviceProcAddr(VkDevice device, const char* name) {
@@ -607,9 +629,9 @@ PFN_vkVoidFunction layerGetDeviceProcAddr(VkDevice device, const char* name) {
     if (!strcmp(name, "vkGetDeviceProcAddr")) return reinterpret_cast<PFN_vkVoidFunction>(layerGetDeviceProcAddr);
     if (PFN_vkVoidFunction hook = deviceHook(name)) return hook;
     DeviceInfo* d = device ? findDevice(device) : nullptr;
-    if (d && d->innerGdpa) return d->innerGdpa(device, name);
+    if (d && d->innerGdpa) return orStandIn(name, d->innerGdpa(device, name));
     const InnerLayer& inner = innerLayer();
-    return inner.gdpa ? inner.gdpa(device, name) : nullptr;
+    return orStandIn(name, inner.gdpa ? inner.gdpa(device, name) : nullptr);
 }
 
 bool PresentStats::tick(uint32_t logInterval) {
