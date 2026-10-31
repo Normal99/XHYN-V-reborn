@@ -86,5 +86,5 @@ EXPORT PFN_vkVoidFunction BCnLayer_GetDeviceProcAddr(VkDevice device, const char
     return next ? next(device, name) : nullptr;
 }
 
-// Used by the harness to prove the shim's tail-jump forwards arguments and result.
-EXPORT int BCnLayer_Diagnostics(int a, int b, int c) { return a * 100 + b * 10 + c + 4200; }
+// Used by the harness to prove the shim's tail-jump forwards the result.
+EXPORT const char* BCnLayer_Diagnostics() { return "inner stub diagnostics"; }

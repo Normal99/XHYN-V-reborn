@@ -364,9 +364,14 @@ int main(int argc, char** argv) {
     if (!vk.shim) { fprintf(stderr, "cannot load shim %s: %s\n", o.shim.c_str(), dlerror()); return 2; }
     vk.shimGipa = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(vk.shim, "BCnLayer_GetInstanceProcAddr"));
     vk.shimGdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(dlsym(vk.shim, "BCnLayer_GetDeviceProcAddr"));
-    auto diagnostics = reinterpret_cast<int (*)(int, int, int)>(dlsym(vk.shim, "BCnLayer_Diagnostics"));
+    auto diagnostics = reinterpret_cast<const char* (*)()>(dlsym(vk.shim, "BCnLayer_Diagnostics"));
     CHECK(vk.shimGipa && vk.shimGdpa && diagnostics, "shim does not export the three BCnLayer_* symbols");
     if (!vk.shimGipa || !vk.shimGdpa) return 2;
+    if (o.checkDiagnostics) {
+        // The launcher calls this before any instance exists and appends the result to a std::string.
+        const char* v = diagnostics();
+        CHECK(v && !*v, "BCnLayer_Diagnostics before any instance returned %s, expected an empty string", v ? v : "null");
+    }
 
     // --- instance, the way LayerCreateInstance builds it ---
     const char* extensions[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME, VK_EXT_DEBUG_UTILS_EXTENSION_NAME};
@@ -385,10 +390,10 @@ int main(int argc, char** argv) {
     auto createInstance = reinterpret_cast<PFN_vkCreateInstance>(vk.shimGipa(VK_NULL_HANDLE, "vkCreateInstance"));
     VK_OK(createInstance(&ici, nullptr, &vk.instance));
     if (o.checkDiagnostics) {
-        // Forwarded to the original layer only when the instance went through it, else a stub (0).
-        const int v = diagnostics(1, 2, 3);
-        const int expected = o.diagnosticsBypassed ? 0 : 123 + 4200;
-        CHECK(v == expected, "BCnLayer_Diagnostics returned %d, expected %d", v, expected);
+        // Forwarded to the original layer only when the instance went through it, else a stub ("").
+        const char* v = diagnostics();
+        const char* expected = o.diagnosticsBypassed ? "" : "inner stub diagnostics";
+        CHECK(v && !strcmp(v, expected), "BCnLayer_Diagnostics returned %s, expected \"%s\"", v ? v : "null", expected);
     }
 
     auto createMessenger = instanceFn<PFN_vkCreateDebugUtilsMessengerEXT>(vk, "vkCreateDebugUtilsMessengerEXT");

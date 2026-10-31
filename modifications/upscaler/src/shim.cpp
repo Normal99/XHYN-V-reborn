@@ -21,8 +21,9 @@ XHYN_EXPORT PFN_vkVoidFunction BCnLayer_GetDeviceProcAddr(VkDevice device, const
 // BCnLayer_Diagnostics has no public prototype, so it is forwarded with a tail jump
 // that keeps every argument register and the return value untouched. It goes to the
 // original layer only for instances created through it (layer.cpp), else to a stub.
+// libgtav_vulkan.so appends the result to a std::string, so the stub must not return null.
 extern "C" {
-static void* diagnosticsFallback() { return nullptr; }
+static const char* diagnosticsFallback() { return ""; }
 __attribute__((visibility("hidden"))) void* xhyn_diagnostics_target = reinterpret_cast<void*>(&diagnosticsFallback);
 }
 
